@@ -10,6 +10,7 @@ import { Icon } from './icons';
 import { layoutAll } from '../text';
 import { rasterCanvas } from '../raster';
 import { ClipInspector, TrackInspector, SequenceInspector } from './MotionProps';
+import { addLayerMask, applyLayerMask, autocropLayer, deleteLayerMask, invertLayerMask, layerToImageSize, mergeDown } from '../grain';
 import { EffectsSection, MarkerSection, GroupSection, TransformSection, PathExtras, NodeSection, TextPathSection, TextExtras, TableProps, ImageProps, LayoutSection } from './InkProps';
 
 const live = () => emit();
@@ -274,10 +275,40 @@ function TextProps({ objs }: { objs: Obj[] }) {
 function RasterProps({ o }: { o: Obj }) {
   const c = rasterCanvas(o);
   const a = anim(o, editTime());
-  const dpi = Math.round((c.width / (Math.abs((o.w || c.width) * a.sx) / 96)) );
+  const dpi = Math.round((c.width / (Math.abs((o.w || c.width) * a.sx) / 96)));
+  const hasMask = !!o.maskSrc;
   return (
     <Section title="Pixels">
       <p className="muted small">{c.width} × {c.height} px · effective resolution {dpi} ppi</p>
+      <label className="check"><input type="checkbox" checked={!!o.lockAlpha} onChange={e => { o.lockAlpha = e.target.checked; commit('Lock transparency'); }} /> Lock transparency (paint only on existing pixels)</label>
+      {S.ui.mode === 'grain' && (
+        <>
+          <div className="field-label">Layer mask</div>
+          {!hasMask ? (
+            <div className="btn-wrap">
+              <button className="btn small" onClick={() => addLayerMask(o, 'white')}>Add (reveal all)</button>
+              <button className="btn small" onClick={() => addLayerMask(o, 'black')}>Add (hide all)</button>
+              <button className="btn small" onClick={() => addLayerMask(o, 'selection')}>From selection</button>
+              <button className="btn small" onClick={() => addLayerMask(o, 'alpha')}>From transparency</button>
+            </div>
+          ) : (
+            <>
+              <label className="check"><input type="checkbox" checked={S.ui.maskEdit} onChange={e => { S.ui.maskEdit = e.target.checked; emit(); }} /> Paint on the mask instead of the pixels</label>
+              <div className="btn-wrap">
+                <button className="btn small" onClick={() => invertLayerMask(o)}>Invert</button>
+                <button className="btn small" onClick={() => applyLayerMask(o)}>Apply</button>
+                <button className="btn small danger" onClick={() => deleteLayerMask(o)}>Delete</button>
+              </div>
+              <p className="muted small">Light colours reveal the layer, dark colours hide it. Nothing is lost until you apply the mask.</p>
+            </>
+          )}
+          <div className="btn-wrap">
+            <button className="btn small" onClick={() => mergeDown(o)}>Merge down</button>
+            <button className="btn small" onClick={() => layerToImageSize(o)}>Layer to image size</button>
+            <button className="btn small" onClick={() => autocropLayer(o)}>Crop to content</button>
+          </div>
+        </>
+      )}
       {S.ui.mode !== 'grain' && <button className="btn small" onClick={() => { S.ui.mode = 'grain'; S.ui.tools.grain = 'brush'; emit(); }}><Icon name="brush" size={14} /> Paint in Grain</button>}
       {(S.ui.mode === 'ink' || S.ui.mode === 'print') && <button className="btn small" onClick={() => { S.ui.modal = { kind: 'trace' }; emit(); }}><Icon name="pen" size={14} /> Trace bitmap…</button>}
     </Section>

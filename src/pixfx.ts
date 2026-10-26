@@ -45,6 +45,8 @@ export const FILTERS: FilterDef[] = [
   { id: 'dropshadow', name: 'Drop Shadow', params: [{ key: 'x', label: 'Offset X', min: -100, max: 100, def: 8 }, { key: 'y', label: 'Offset Y', min: -100, max: 100, def: 8 }, { key: 'r', label: 'Blur', min: 0, max: 50, def: 8 }, { key: 'o', label: 'Opacity', min: 0, max: 100, def: 60 }] },
   { id: 'bw', name: 'Black & White (mixer)', params: [{ key: 'r', label: 'Red', min: -100, max: 200, def: 30 }, { key: 'g', label: 'Green', min: -100, max: 200, def: 59 }, { key: 'b', label: 'Blue', min: -100, max: 200, def: 11 }] },
   { id: 'noisehsv', name: 'Colour Noise', params: [{ key: 'a', label: 'Amount', min: 0, max: 100, def: 15 }] },
+  { id: 'clouds', name: 'Clouds (render)', params: [{ key: 'scale', label: 'Scale', min: 20, max: 600, def: 160 }, { key: 'detail', label: 'Detail', min: 1, max: 7, def: 5 }, { key: 'seed', label: 'Seed', min: 1, max: 999, def: 7 }] },
+  { id: 'checker', name: 'Checkerboard (render)', params: [{ key: 's', label: 'Square size', min: 2, max: 200, def: 32 }] },
   { id: 'lens', name: 'Lens Distortion', params: [{ key: 'a', label: 'Barrel / pincushion', min: -100, max: 100, def: 30 }] },
 ];
 
@@ -202,12 +204,36 @@ function sample(src: ImageData, x: number, y: number, out: number[]) {
 
 const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
 
+function hash2(x: number, y: number, seed: number) { let h = (x * 374761393 + y * 668265263 + seed * 1442695041) | 0; h = (h ^ (h >>> 13)) * 1274126177; return ((h ^ (h >>> 16)) >>> 0) / 4294967296; }
+function vnoise(x: number, y: number, seed: number) {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi, seed), b = hash2(xi + 1, yi, seed), c = hash2(xi, yi + 1, seed), d = hash2(xi + 1, yi + 1, seed);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+
 function runExtra(id: string, src: ImageData, p: Record<string, number>, extra: FxExtra): ImageData {
   const w = src.width, h = src.height;
   const out = new ImageData(new Uint8ClampedArray(src.data), w, h);
   const d = out.data, s = src.data;
   const tmp = [0, 0, 0, 0];
   switch (id) {
+    case 'clouds': {
+      const a = hexRgb(extra.fg || '#000000'), b = hexRgb(extra.bg || '#ffffff');
+      const oct = Math.round(p.detail);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        let amp = 1, f = 1 / p.scale, sum = 0, norm = 0;
+        for (let o = 0; o < oct; o++) { sum += vnoise(x * f, y * f, p.seed + o * 17) * amp; norm += amp; amp *= 0.5; f *= 2; }
+        const t = Math.max(0, Math.min(1, ((sum / norm) - 0.5) * 1.6 + 0.5)), i = (y * w + x) * 4;
+        d[i] = a[0] + (b[0] - a[0]) * t; d[i + 1] = a[1] + (b[1] - a[1]) * t; d[i + 2] = a[2] + (b[2] - a[2]) * t; d[i + 3] = 255;
+      }
+      break;
+    }
+    case 'checker': {
+      const a = hexRgb(extra.fg || '#000000'), b = hexRgb(extra.bg || '#ffffff'), sz = Math.max(1, Math.round(p.s));
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const on = (Math.floor(x / sz) + Math.floor(y / sz)) % 2 === 0, c = on ? a : b, i = (y * w + x) * 4; d[i] = c[0]; d[i + 1] = c[1]; d[i + 2] = c[2]; d[i + 3] = 255; }
+      break;
+    }
     case 'curves': {
       const c = extra.curves;
       if (!c) break;

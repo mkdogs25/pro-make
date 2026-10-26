@@ -9,7 +9,8 @@ import {
   addLayer, deleteLayer, moveLayer, addPage, duplicatePage, deletePage, movePage, goPage, placePage, newRasterLayer, flattenPage,
   rasterise, addMediaClip, addSceneClip, addTitleClip, paintTarget, editTime,
 } from '../ops';
-import { FILTERS, selectAllPixels, selectNone, invertSelection, fillSelection, cropRasterToSelection, selectionBounds, cropPageTo, hasSelection } from '../grain';
+import { FILTERS, openFilter, selectAllPixels, selectNone, invertSelection, fillSelection, cropRasterToSelection, selectionBounds, cropPageTo, hasSelection, saveChannel, loadChannel, deleteChannel, selectionToPath, selectFromShapes, CHANNELS } from '../grain';
+import { FILTER_CATS } from './filtercats';
 import { importFiles, pickFiles } from '../io';
 import { addGenerator, placeMedia } from '../motion';
 import { rasterCanvas } from '../raster';
@@ -84,6 +85,9 @@ export function LayersPanel() {
                   {renaming === o.id
                     ? <input className="rename" autoFocus defaultValue={o.name} onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }} onBlur={e => { o.name = e.target.value || o.name; setRenaming(null); commit(); }} />
                     : <span className="name" onDoubleClick={() => setRenaming(o.id)}>{o.name}</span>}
+                  {o.maskSrc && <span className="mask-dot" title="Has a layer mask">▣</span>}
+                  {o.group && <span className="mask-dot" title="Grouped">⧉</span>}
+                  {o.clipBy && <span className="mask-dot" title="Clipped">✂</span>}
                   {o.keys && Object.values(o.keys).some(k => k?.length) && <span className="anim-dot" title="Animated">◆</span>}
                   <IconBtn icon={o.locked ? 'lock' : 'unlock'} title={o.locked ? 'Unlock' : 'Lock'} onClick={e => { e.stopPropagation(); o.locked = !o.locked; commit(); }} size={12} className={o.locked ? '' : 'dim'} />
                   <IconBtn icon={o.visible ? 'eye' : 'eyeoff'} title={o.visible ? 'Hide' : 'Show'} onClick={e => { e.stopPropagation(); o.visible = !o.visible; commit(); }} size={12} className={o.visible ? '' : 'dim'} />
@@ -224,23 +228,17 @@ export function AdjustPanel() {
     if (!o) { toast('Select a pixel layer first (or rasterise a shape)'); return null; }
     return o;
   };
+  const chans = CHANNELS.filter(c => c.pageId === S.ui.pageId);
   return (
     <div className="panel-scroll">
-      <Section title="Colours & filters">
-        <div className="filter-list">
-          {FILTERS.map(f => (
-            <button key={f.id} className="filter-btn" onClick={() => { const o = target(); if (o) { S.ui.sel = [o.id]; S.ui.modal = { kind: 'filter', data: f.id }; emit(); } }}>
-              <Icon name="sliders" size={13} /> {f.name}
-            </button>
-          ))}
-        </div>
-        <p className="muted small">Filters apply to the selected pixel layer, limited to the current selection if there is one.</p>
-      </Section>
       <Section title="Selection">
         <div className="btn-wrap">
           <button className="btn small" onClick={selectAllPixels}>All</button>
           <button className="btn small" onClick={selectNone}>None</button>
           <button className="btn small" onClick={invertSelection}>Invert</button>
+          <button className="btn small" disabled={!hasSelection()} onClick={saveChannel}>Save to channel</button>
+          <button className="btn small" disabled={!hasSelection()} onClick={selectionToPath}>To path</button>
+          <button className="btn small" onClick={selectFromShapes}>From shapes</button>
         </div>
         <div className="seg wide" role="radiogroup" aria-label="Selection mode">
           {(['replace', 'add', 'subtract', 'intersect'] as const).map(m => (
@@ -254,8 +252,35 @@ export function AdjustPanel() {
           <button className="btn small" disabled={!hasSelection()} onClick={() => { const o = target(); if (o) cropRasterToSelection(o); }}>Crop layer</button>
           <button className="btn small" disabled={!hasSelection()} onClick={() => { const b = selectionBounds(); if (b) cropPageTo(b); }}>Crop canvas</button>
         </div>
+        {chans.length > 0 && (
+          <>
+            <div className="field-label">Saved selections</div>
+            {chans.map(ch => (
+              <div key={ch.id} className="row">
+                <span className="grow">{ch.name}</span>
+                <button className="btn small" onClick={() => loadChannel(ch.id)}>Load</button>
+                <IconBtn icon="trash" title="Delete" size={12} onClick={() => deleteChannel(ch.id)} />
+              </div>
+            ))}
+          </>
+        )}
       </Section>
-      <Section title="Layers">
+      {FILTER_CATS.map(cat => (
+        <Section key={cat.name} title={cat.name} open={cat.name === 'Colours'}>
+          <div className="filter-list">
+            {cat.ids.map(id => {
+              const f = FILTERS.find(x => x.id === id)!;
+              return (
+                <button key={f.id} className="filter-btn" onClick={() => openFilter(f.id)}>
+                  <Icon name="sliders" size={13} /> {f.name.replace(/ \(render\)$/, '').replace(/…$/, '')}
+                </button>
+              );
+            })}
+          </div>
+        </Section>
+      ))}
+      <p className="muted small pad">Filters apply to the selected pixel layer, limited to the current selection. More commands are in the Image, Layer and Select menus above the canvas.</p>
+      <Section title="Layers" open={false}>
         <div className="btn-wrap">
           <button className="btn small" onClick={() => newRasterLayer()}>New pixel layer</button>
           <button className="btn small" onClick={() => newRasterLayer('#FFFFFF')}>New white layer</button>

@@ -325,10 +325,11 @@ export function flattenPage() {
   renderPage(c.getContext('2d')!, S.doc, pg, { time: editTime() });
   const r = newObj('raster', S.doc.layers[0].id, { name: 'Flattened', x: pg.w / 2, y: pg.h / 2, w: pg.w, h: pg.h });
   storeRaster(r, c);
-  const keep = pg.objects.filter(o => !isEditable(o));
+  // everything visible was just baked in; only hidden objects (or ones on hidden layers) stay behind
+  const keep = pg.objects.filter(o => !o.visible || !S.doc.layers.find(l => l.id === o.layerId)?.visible);
   pg.objects = [r, ...keep];
   S.ui.sel = [r.id];
-  commit();
+  commit('Flatten image');
 }
 
 /** Find the raster to paint on: the selected one, or the topmost raster under the point, or a new layer. */

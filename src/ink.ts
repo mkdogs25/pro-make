@@ -205,6 +205,11 @@ function loopsToSubpaths(loops: Pt[][], smooth: number, speckle: number, toLocal
   return res;
 }
 
+/** Outline a binary mask as editable Bézier subpaths (used by selection → path). */
+export function maskToSubpaths(mask: Uint8Array, w: number, h: number, smooth = 0.8, speckle = 4): SubPath[] {
+  return loopsToSubpaths(loopsOf(mask, w, h), smooth, speckle, p => p);
+}
+
 export function traceBitmap(opts: TraceOpts) {
   const src = selected().find(o => o.type === 'raster' || o.type === 'image');
   if (!src) { toast('Select a pixel layer to trace'); return; }

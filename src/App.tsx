@@ -10,6 +10,9 @@ import Props from './ui/Props';
 import { LayersPanel, PagesPanel, StylesPanel, AdjustPanel, MediaPanel } from './ui/Panels';
 import Timeline from './ui/Timeline';
 import { ColourPanel } from './ui/ColourPanel';
+import { ToolPanel } from './ui/ToolPanel';
+import { MenuBar } from './ui/MenuBar';
+import { AskModal, ScaleImageModal, CanvasSizeModal, CurvesModal, type Ask } from './ui/GrainModals';
 import { SymbolsPanel } from './ui/SymbolsPanel';
 import { TraceModal, TilesModal } from './ui/InkModals';
 import { ExportOptsModal, SourceModal, ScopesPanel } from './ui/MotionModals';
@@ -19,7 +22,9 @@ import { saveProject, openProject, importFiles, pickFiles, exportPNG, exportJPEG
 import { togglePlay, seek, pause } from './playback';
 import { groupSel, ungroupSel } from './ink';
 import { addMarker, copyClip, duplicateClip, fitTimeline, pasteClip, setInPoint, setOutPoint } from './motion';
-import { FILTERS, Adjust, selectAllPixels, selectNone, invertSelection, fillSelection, hasSelection } from './grain';
+import { FILTERS, Adjust, selectAllPixels, selectNone, invertSelection, fillSelection, hasSelection, toggleQuickMask } from './grain';
+import { BRUSH_TOOLS } from './brush';
+import { histogram } from './pixfx';
 import { setProp, anim } from './geometry';
 import { imageFor } from './raster';
 import { layoutAll, invalidateText } from './text';
@@ -140,7 +145,7 @@ function ToolOptions() {
   const mode = S.ui.mode, t = tool();
   const def = TOOLS[mode].find(x => x.id === t);
   const b = S.ui.brush;
-  const brushy = mode === 'grain' && ['brush', 'pencil', 'eraser', 'smudge', 'clone', 'dodge', 'burn'].includes(t);
+  const brushy = mode === 'grain' && (BRUSH_TOOLS as string[]).includes(t);
   const sel = selected();
   return (
     <div className="tool-options">
@@ -196,7 +201,8 @@ function ToolOptions() {
         </span>
       )}
       {t === 'pen' && stageApi.pen && <button className="btn small primary" onClick={() => stageApi.finishPen()}>Finish path</button>}
-      {mode === 'grain' && hasSelection() && <button className="btn small ghost" onClick={selectNone}>Deselect</button>}
+      {mode === 'grain' && <button className={`btn small ghost ${S.ui.quickMask ? 'on' : ''}`} onClick={toggleQuickMask} title="Quick mask (Q): paint your selection">Quick mask</button>}
+      {mode === 'grain' && hasSelection() && !S.ui.quickMask && <button className="btn small ghost" onClick={selectNone}>Deselect</button>}
       <span className="tool-hint">{def?.hint}</span>
     </div>
   );
@@ -231,7 +237,7 @@ const TABS: Record<Mode, { id: string; label: string; icon: string }[]> = {
   motion: [{ id: 'props', label: 'Inspector', icon: 'sliders' }, { id: 'media', label: 'Media', icon: 'film' }, { id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'scopes', label: 'Scopes', icon: 'wave' }],
   ink: [{ id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'symbols', label: 'Symbols', icon: 'symbols' }],
   print: [{ id: 'pages', label: 'Pages', icon: 'pages' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'styles', label: 'Styles', icon: 'type' }, { id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'symbols', label: 'Symbols', icon: 'symbols' }],
-  grain: [{ id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'adjust', label: 'Adjust', icon: 'sparkle' }],
+  grain: [{ id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'tool', label: 'Tool options', icon: 'brush' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'adjust', label: 'Adjust', icon: 'sparkle' }],
 };
 
 function Swatches() {
@@ -276,6 +282,7 @@ function Sidebar() {
         {tab === 'adjust' && <AdjustPanel />}
         {tab === 'media' && <MediaPanel />}
         {tab === 'colour' && <ColourPanel />}
+        {tab === 'tool' && <ToolPanel />}
         {tab === 'scopes' && <ScopesPanel />}
         {tab === 'symbols' && <SymbolsPanel />}
       </div>
@@ -290,10 +297,18 @@ function FilterModal({ id }: { id: string }) {
   const [params, setParams] = useState<Record<string, number>>(() => Object.fromEntries(def.params.map(p => [p.key, p.def])));
   const adj = useRef<Adjust | null>(null);
   const [preview, setPreview] = useState(true);
+  const histRef = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     const o = selected().find(x => x.type === 'raster');
     if (!o) { S.ui.modal = null; emit(); return; }
     adj.current = new Adjust(o);
+    const hc = histRef.current;
+    if (hc) {
+      const h = histogram(adj.current.before), x = hc.getContext('2d')!;
+      let mx = 1; for (let i = 1; i < 255; i++) mx = Math.max(mx, h.r[i], h.g[i], h.b[i]);
+      x.fillStyle = '#14110e'; x.fillRect(0, 0, 256, 56); x.globalCompositeOperation = 'lighter'; x.globalAlpha = 0.6;
+      for (const [arr, col] of [[h.r, '#ff4040'], [h.g, '#40ff60'], [h.b, '#4080ff']] as const) { x.fillStyle = col; for (let i = 0; i < 256; i++) { const hh = Math.min(56, (arr[i] / mx) * 56); x.fillRect(i, 56 - hh, 1, hh); } }
+    }
     adj.current.preview(id, params);
     return () => { if (adj.current) adj.current.cancel(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -304,13 +319,14 @@ function FilterModal({ id }: { id: string }) {
     return () => clearTimeout(h);
   }, [params, preview, id]);
   const close = (apply: boolean) => {
-    if (adj.current) { if (apply) { adj.current.preview(id, params); adj.current.apply(); } else adj.current.cancel(); adj.current = null; }
+    if (adj.current) { if (apply) { adj.current.preview(id, params); adj.current.apply(def.name); } else adj.current.cancel(); adj.current = null; }
     S.ui.modal = null; emit();
   };
   return (
     <div className="modal-back" onPointerDown={e => e.target === e.currentTarget && close(false)}>
       <div className="modal filter-modal" role="dialog" aria-label={def.name}>
         <h3><Icon name="sliders" size={16} /> {def.name}</h3>
+        <canvas ref={histRef} width={256} height={56} className="scope" aria-label="Histogram of the layer" />
         {def.params.length === 0 && <p className="muted">No settings. Apply to commit.</p>}
         {def.params.map(p => (
           <Slider key={p.key} label={p.label} value={params[p.key]} min={p.min} max={p.max} step={p.step || 1} onChange={v => setParams({ ...params, [p.key]: v })} />
@@ -489,6 +505,7 @@ function useShortcuts() {
       if (e.altKey) return;
       if (k === 'x' && !e.shiftKey && mode !== 'grain') { [S.ui.fg, S.ui.bg] = [S.ui.bg, S.ui.fg]; emit(); return; }
       if (k === 'x' && e.shiftKey) { [S.ui.fg, S.ui.bg] = [S.ui.bg, S.ui.fg]; emit(); return; }
+      if (mode === 'grain' && k === 'q') { toggleQuickMask(); return; }
       if (mode === 'motion' && k === 's') { splitClip(); return; }
       if (mode === 'motion' && k === 'm') { addMarker(); return; }
       if (mode === 'motion' && k === 'i') { setInPoint(); return; }
@@ -537,13 +554,17 @@ export default function App() {
       <div className="workspace">
         <Toolbox />
         <main className="centre">
+          <MenuBar />
           <ToolOptions />
           {ready && <Stage key={mode} />}
         </main>
         <Sidebar />
       </div>
       {mode === 'motion' ? <Timeline /> : <StatusBar />}
-      {m?.kind === 'filter' && <FilterModal id={m.data as string} />}
+      {m?.kind === 'filter' && (m.data === 'curves' ? <CurvesModal /> : <FilterModal id={m.data as string} />)}
+      {m?.kind === 'ask' && <AskModal a={m.data as Ask} />}
+      {m?.kind === 'scale-image' && <ScaleImageModal />}
+      {m?.kind === 'canvas-size' && <CanvasSizeModal />}
       {m?.kind === 'preflight' && <Preflight />}
       {m?.kind === 'export-video' && <VideoProgress />}
       {m?.kind === 'shortcuts' && <Shortcuts />}

@@ -191,7 +191,29 @@ export function PaintField({ value, onChange, onCommit, allowNone = true }: { va
   );
 }
 
-export function Menu({ label, icon, items, align = 'left' }: { label?: string; icon?: string; items: ({ label: string; icon?: string; kbd?: string; onClick: () => void; disabled?: boolean } | 'sep')[]; align?: 'left' | 'right' }) {
+export interface MenuItem { label: string; icon?: string; kbd?: string; onClick?: () => void; disabled?: boolean; sub?: (MenuItem | 'sep')[] }
+
+function MenuList({ items, close }: { items: (MenuItem | 'sep')[]; close: () => void }) {
+  const [openSub, setOpenSub] = useState<number | null>(null);
+  return (
+    <>
+      {items.map((it, i) => it === 'sep' ? <hr key={i} /> : it.sub ? (
+        <div key={i} className="has-sub" onMouseEnter={() => setOpenSub(i)} onMouseLeave={() => setOpenSub(null)}>
+          <button role="menuitem" aria-haspopup="menu" aria-expanded={openSub === i} onClick={() => setOpenSub(openSub === i ? null : i)}>
+            {it.icon && <Icon name={it.icon} size={15} />}<span>{it.label}</span><Icon name="chevron" size={12} />
+          </button>
+          {openSub === i && <div className="menu-pop sub" role="menu"><MenuList items={it.sub} close={close} /></div>}
+        </div>
+      ) : (
+        <button key={i} role="menuitem" disabled={it.disabled} onClick={() => { close(); it.onClick?.(); }}>
+          {it.icon && <Icon name={it.icon} size={15} />}<span>{it.label}</span>{it.kbd && <kbd>{it.kbd}</kbd>}
+        </button>
+      ))}
+    </>
+  );
+}
+
+export function Menu({ label, icon, items, align = 'left' }: { label?: string; icon?: string; items: (MenuItem | 'sep')[]; align?: 'left' | 'right' }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -205,15 +227,7 @@ export function Menu({ label, icon, items, align = 'left' }: { label?: string; i
       <button className={`btn ghost ${open ? 'on' : ''}`} onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open}>
         {icon && <Icon name={icon} size={16} />}{label}
       </button>
-      {open && (
-        <div className={`menu-pop ${align}`} role="menu">
-          {items.map((it, i) => it === 'sep' ? <hr key={i} /> : (
-            <button key={i} role="menuitem" disabled={it.disabled} onClick={() => { setOpen(false); it.onClick(); }}>
-              {it.icon && <Icon name={it.icon} size={15} />}<span>{it.label}</span>{it.kbd && <kbd>{it.kbd}</kbd>}
-            </button>
-          ))}
-        </div>
-      )}
+      {open && <div className={`menu-pop ${align}`} role="menu"><MenuList items={items} close={() => setOpen(false)} /></div>}
     </div>
   );
 }

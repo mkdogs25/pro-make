@@ -4,6 +4,13 @@ import { sampleDoc } from './sample';
 
 export interface View { zoom: number; x: number; y: number; fitted: boolean; manual?: boolean }
 
+export interface BrushState {
+  size: number; hardness: number; opacity: number; flow: number; spacing: number; scatter: number; sizeJitter: number;
+  shape: 'round' | 'square' | 'diamond' | 'star' | 'spray' | 'chalk'; angle: number; aspect: number;
+  symmetry: 'none' | 'h' | 'v' | 'both' | 'radial'; symN: number; pressure: boolean;
+}
+export interface GradientState { type: 'linear' | 'radial' | 'conical' | 'square' | 'bilinear'; repeat: 'none' | 'sawtooth' | 'triangle'; toTransparent: boolean; reverse: boolean }
+
 export interface UI {
   mode: Mode;
   tools: Record<Mode, string>;
@@ -13,12 +20,17 @@ export interface UI {
   theme: 'light' | 'dark';
   fg: string; bg: string;
   strokeWidth: number;
-  brush: { size: number; hardness: number; opacity: number; flow: number };
+  brush: BrushState;
   tolerance: number;
   selMode: 'replace' | 'add' | 'subtract' | 'intersect';
   star: { points: number; inner: number; polygon: boolean };
   rectRadius: number;
   textDefaults: { font: string; size: number };
+  quickMask: boolean;
+  maskEdit: boolean;
+  gradient: GradientState;
+  bucket: { mode: 'similar' | 'selection'; merged: boolean; contiguous: boolean };
+  picker: { size: number; merged: boolean };
   selClip: string | null;
   nodeSel: { sp: number; i: number }[];
   autoKey: boolean;
@@ -58,12 +70,17 @@ export const S: { doc: Doc; ui: UI } = {
     theme: (localStorage.getItem('promake-theme') as 'light' | 'dark') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
     fg: '#E76F51', bg: '#2B5D8C',
     strokeWidth: 2,
-    brush: { size: 24, hardness: 0.6, opacity: 1, flow: 1 },
+    brush: { size: 24, hardness: 0.6, opacity: 1, flow: 1, spacing: 12, scatter: 0, sizeJitter: 0, shape: 'round', angle: 0, aspect: 100, symmetry: 'none', symN: 6, pressure: true },
     tolerance: 32,
     selMode: 'replace',
     star: { points: 5, inner: 0.45, polygon: false },
     rectRadius: 0,
     textDefaults: { font: 'Inter', size: 24 },
+    quickMask: false,
+    maskEdit: false,
+    gradient: { type: 'linear', repeat: 'none', toTransparent: false, reverse: false },
+    bucket: { mode: 'similar', merged: false, contiguous: true },
+    picker: { size: 1, merged: true },
     selClip: null,
     nodeSel: [],
     autoKey: true,
@@ -114,15 +131,19 @@ export function setTime(t: number) { T.time = Math.max(0, t); emitTime(); }
 // ---------- history ----------
 const past: string[] = [];
 const future: string[] = [];
+const pastLabels: string[] = [];
+const futureLabels: string[] = [];
 let current = JSON.stringify(S.doc);
 const LIMIT = 80;
 
-export function commit() {
+export function commit(labelArg?: unknown) {
+  // commit is often passed straight to onBlur handlers, so ignore non-string arguments
+  const label = typeof labelArg === 'string' ? labelArg : 'Edit';
   const next = JSON.stringify(S.doc);
   if (next === current) { emit(); return; }
-  past.push(current);
-  if (past.length > LIMIT) past.shift();
-  future.length = 0;
+  past.push(current); pastLabels.push(label);
+  if (past.length > LIMIT) { past.shift(); pastLabels.shift(); }
+  future.length = 0; futureLabels.length = 0;
   current = next;
   emit();
   afterCommit.forEach(f => f());
@@ -139,14 +160,27 @@ function restore(json: string) {
   emit();
   afterCommit.forEach(f => f());
 }
-export function undo() { if (past.length) { future.push(current); restore(past.pop()!); } }
-export function redo() { if (future.length) { past.push(current); restore(future.pop()!); } }
+export function undo() { if (past.length) { future.push(current); futureLabels.push(pastLabels.pop()!); restore(past.pop()!); } }
+export function redo() { if (future.length) { past.push(current); pastLabels.push(futureLabels.pop()!); restore(future.pop()!); } }
+/** Every state in order (oldest first) with its label; `at` marks the current one. */
+export function historyList(): { label: string; at: boolean }[] {
+  const out = [{ label: 'Original', at: false }];
+  pastLabels.forEach(l => out.push({ label: l, at: false }));
+  out[out.length - 1].at = true;
+  for (let i = futureLabels.length - 1; i >= 0; i--) out.push({ label: futureLabels[i], at: false });
+  return out;
+}
+export function jumpHistory(index: number) {
+  const cur = past.length;
+  for (let i = cur; i > index && past.length; i--) undo();
+  for (let i = cur; i < index && future.length; i++) redo();
+}
 export const canUndo = () => past.length > 0;
 export const canRedo = () => future.length > 0;
 
 export function replaceDoc(doc: Doc) {
   S.doc = doc;
-  past.length = 0; future.length = 0;
+  past.length = 0; future.length = 0; pastLabels.length = 0; futureLabels.length = 0;
   current = JSON.stringify(doc);
   S.ui.sel = []; S.ui.selClip = null; S.ui.nodeSel = [];
   S.ui.pageId = doc.pages.find(p => !p.isMaster)?.id || doc.pages[0].id;

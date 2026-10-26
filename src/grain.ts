@@ -1,7 +1,11 @@
 import { S, commit, emit, page, toast } from './store';
 import type { Obj } from './model';
 import { makeCanvas, rasterCanvas, storeRaster, cloneCanvas } from './raster';
-import { rasterToPage, toRasterPx, editTime } from './ops';
+import { rasterToPage, toRasterPx, editTime, renderObjectsToCanvas, addObj, currentLayerId, paintTarget } from './ops';
+import { maskToSubpaths } from './ink';
+import { newObj, uid } from './model';
+import { objMatrix, objPath2D, pageBox, unionBox, recentrePath } from './geometry';
+import { editableMask, maskCanvas, storeMask } from './raster';
 import { renderPage } from './render';
 
 // ---------- selection mask (page space) ----------
@@ -39,6 +43,8 @@ export function invertSelection() {
   if (hasSelection()) { ctx.globalCompositeOperation = 'destination-out'; ctx.drawImage(GS.mask!, 0, 0); }
   GS.mask = c; GS.pageId = pg.id; updateEdges();
 }
+
+export function refreshSelection() { if (GS.mask) updateEdges(); else emit(); }
 
 function updateEdges() {
   const m = GS.mask!;
@@ -92,11 +98,22 @@ export function compositePage(): HTMLCanvasElement {
   return c;
 }
 
-export function pickColour(p: { x: number; y: number }): string | null {
-  const c = compositePage();
-  if (p.x < 0 || p.y < 0 || p.x >= c.width || p.y >= c.height) return null;
-  const d = c.getContext('2d')!.getImageData(Math.floor(p.x), Math.floor(p.y), 1, 1).data;
-  return '#' + [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join('').toUpperCase();
+export function pickColour(p: { x: number; y: number }, size = S.ui.picker.size, merged = S.ui.picker.merged): string | null {
+  let src: HTMLCanvasElement, px = Math.floor(p.x), py = Math.floor(p.y);
+  if (merged) src = compositePage();
+  else {
+    const o = S.ui.sel.length ? page().objects.find(x => x.id === S.ui.sel[0] && x.type === 'raster') : null;
+    if (!o) src = compositePage();
+    else { src = rasterCanvas(o); const q = toRasterPx(o, p); px = Math.floor(q.x); py = Math.floor(q.y); }
+  }
+  if (px < 0 || py < 0 || px >= src.width || py >= src.height) return null;
+  const r = Math.max(0, Math.floor(size / 2));
+  const x0 = Math.max(0, px - r), y0 = Math.max(0, py - r), x1 = Math.min(src.width, px + r + 1), y1 = Math.min(src.height, py + r + 1);
+  const d = src.getContext('2d')!.getImageData(x0, y0, x1 - x0, y1 - y0).data;
+  let R = 0, G = 0, B = 0, A = 0;
+  for (let i = 0; i < d.length; i += 4) { const a = d[i + 3] / 255; R += d[i] * a; G += d[i + 1] * a; B += d[i + 2] * a; A += a; }
+  if (!A) return '#000000';
+  return '#' + [R / A, G / A, B / A].map(v => Math.round(v).toString(16).padStart(2, '0')).join('').toUpperCase();
 }
 
 export function hexToRgb(hex: string): [number, number, number] {
@@ -142,12 +159,35 @@ export function magicWand(p: { x: number; y: number }, mode = S.ui.selMode) {
   combineSelection(m, mode);
 }
 
+function matchAll(data: Uint8ClampedArray, w: number, h: number, sx: number, sy: number, tol: number): Uint8Array {
+  const out = new Uint8Array(w * h);
+  if (sx < 0 || sy < 0 || sx >= w || sy >= h) return out;
+  const i0 = (sy * w + sx) * 4;
+  const r0 = data[i0], g0 = data[i0 + 1], b0 = data[i0 + 2], a0 = data[i0 + 3], t = tol * 4;
+  for (let i = 0; i < w * h; i++) { const j = i * 4; if (Math.abs(data[j] - r0) + Math.abs(data[j + 1] - g0) + Math.abs(data[j + 2] - b0) + Math.abs(data[j + 3] - a0) <= t) out[i] = 1; }
+  return out;
+}
+
 export function bucketFill(o: Obj, pagePt: { x: number; y: number }, colour = S.ui.fg) {
+  if (S.ui.bucket.mode === 'selection') { fillSelection(o, colour); return; }
   const c = rasterCanvas(o);
   const ctx = c.getContext('2d')!;
   const img = ctx.getImageData(0, 0, c.width, c.height);
-  const px = toRasterPx(o, pagePt);
-  const region = flood(img.data, c.width, c.height, Math.floor(px.x), Math.floor(px.y), S.ui.tolerance);
+  let region: Uint8Array;
+  if (S.ui.bucket.merged) {
+    // decide the area from what you see (all layers), then map it onto this layer's pixels
+    const comp = compositePage(), cd = comp.getContext('2d')!.getImageData(0, 0, comp.width, comp.height);
+    const pr = S.ui.bucket.contiguous ? flood(cd.data, comp.width, comp.height, Math.floor(pagePt.x), Math.floor(pagePt.y), S.ui.tolerance) : matchAll(cd.data, comp.width, comp.height, Math.floor(pagePt.x), Math.floor(pagePt.y), S.ui.tolerance);
+    const M = rasterToPage(o);
+    region = new Uint8Array(c.width * c.height);
+    for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+      const qx = Math.floor(M.a * (x + 0.5) + M.c * (y + 0.5) + M.e), qy = Math.floor(M.b * (x + 0.5) + M.d * (y + 0.5) + M.f);
+      if (qx >= 0 && qy >= 0 && qx < comp.width && qy < comp.height && pr[qy * comp.width + qx]) region[y * c.width + x] = 1;
+    }
+  } else {
+    const px = toRasterPx(o, pagePt);
+    region = S.ui.bucket.contiguous ? flood(img.data, c.width, c.height, Math.floor(px.x), Math.floor(px.y), S.ui.tolerance) : matchAll(img.data, c.width, c.height, Math.floor(px.x), Math.floor(px.y), S.ui.tolerance);
+  }
   const mask = maskFor(o);
   const md = mask ? mask.getContext('2d')!.getImageData(0, 0, c.width, c.height).data : null;
   const [r, g, b] = hexToRgb(colour);
@@ -164,7 +204,7 @@ export function bucketFill(o: Obj, pagePt: { x: number; y: number }, colour = S.
   }
   ctx.putImageData(img, 0, 0);
   storeRaster(o);
-  commit();
+  commit('Bucket fill');
 }
 
 export function fillSelection(o: Obj, colour = S.ui.fg, clear = false) {
@@ -189,17 +229,38 @@ export function fillSelection(o: Obj, colour = S.ui.fg, clear = false) {
 export function gradientFill(o: Obj, a: { x: number; y: number }, b: { x: number; y: number }) {
   const c = rasterCanvas(o);
   const pa = toRasterPx(o, a), pb = toRasterPx(o, b);
+  const g = S.ui.gradient;
+  const vx = pb.x - pa.x, vy = pb.y - pa.y, L2 = vx * vx + vy * vy || 1, L = Math.sqrt(L2), ux = vx / L, uy = vy / L;
+  const ang0 = Math.atan2(vy, vx);
+  const [r1, g1, b1] = hexToRgb(S.ui.fg), [r2, g2, b2] = hexToRgb(S.ui.bg);
+  const out = new ImageData(c.width, c.height), d = out.data;
+  for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+    const dx = x + 0.5 - pa.x, dy = y + 0.5 - pa.y;
+    let t: number;
+    switch (g.type) {
+      case 'radial': t = Math.hypot(dx, dy) / L; break;
+      case 'conical': { let q = (Math.atan2(dy, dx) - ang0) / (Math.PI * 2); q -= Math.floor(q); t = q; break; }
+      case 'square': t = Math.max(Math.abs(dx * ux + dy * uy), Math.abs(-dx * uy + dy * ux)) / L; break;
+      case 'bilinear': t = Math.abs((dx * vx + dy * vy) / L2); break;
+      default: t = (dx * vx + dy * vy) / L2;
+    }
+    if (g.repeat === 'sawtooth') t -= Math.floor(t);
+    else if (g.repeat === 'triangle') { const m = ((t % 2) + 2) % 2; t = m > 1 ? 2 - m : m; }
+    t = Math.max(0, Math.min(1, t));
+    if (g.reverse) t = 1 - t;
+    const i = (y * c.width + x) * 4;
+    if (g.toTransparent) { d[i] = r1; d[i + 1] = g1; d[i + 2] = b1; d[i + 3] = 255 * (1 - t); }
+    else { d[i] = r1 + (r2 - r1) * t; d[i + 1] = g1 + (g2 - g1) * t; d[i + 2] = b1 + (b2 - b1) * t; d[i + 3] = 255; }
+  }
   const tmp = makeCanvas(c.width, c.height);
   const t = tmp.getContext('2d')!;
-  const g = t.createLinearGradient(pa.x, pa.y, pb.x, pb.y);
-  g.addColorStop(0, S.ui.fg); g.addColorStop(1, S.ui.bg);
-  t.fillStyle = g; t.fillRect(0, 0, c.width, c.height);
+  t.putImageData(out, 0, 0);
   const mask = maskFor(o);
   if (mask) { t.globalCompositeOperation = 'destination-in'; t.drawImage(mask, 0, 0); }
   const ctx = c.getContext('2d')!;
-  ctx.save(); ctx.globalAlpha = S.ui.brush.opacity; ctx.drawImage(tmp, 0, 0); ctx.restore();
+  ctx.save(); ctx.globalAlpha = S.ui.brush.opacity; if (o.lockAlpha) ctx.globalCompositeOperation = 'source-atop'; ctx.drawImage(tmp, 0, 0); ctx.restore();
   storeRaster(o);
-  commit();
+  commit('Gradient');
 }
 
 export function cropPageTo(b: { x: number; y: number; w: number; h: number }) {
@@ -242,103 +303,9 @@ export function cropRasterToSelection(o: Obj) {
 }
 
 // ---------- brush engine ----------
-export type BrushKind = 'brush' | 'pencil' | 'eraser' | 'smudge' | 'clone' | 'dodge' | 'burn';
-const cloneSrc: { pt: { x: number; y: number } | null; rasterId: string | null } = { pt: null, rasterId: null };
-export function setCloneSource(o: Obj, p: { x: number; y: number }) { cloneSrc.pt = toRasterPx(o, p); cloneSrc.rasterId = o.id; toast('Clone source set'); }
-
-export class Stroke {
-  o: Obj; kind: BrushKind; canvas: HTMLCanvasElement; before: HTMLCanvasElement; buffer: HTMLCanvasElement;
-  mask: HTMLCanvasElement | null; last: { x: number; y: number } | null = null; size: number; dab: HTMLCanvasElement;
-  cloneOffset: { x: number; y: number } | null = null; scale: number;
-  constructor(o: Obj, kind: BrushKind) {
-    this.o = o; this.kind = kind;
-    this.canvas = rasterCanvas(o);
-    this.before = cloneCanvas(this.canvas);
-    this.buffer = makeCanvas(this.canvas.width, this.canvas.height);
-    this.mask = maskFor(o);
-    const m = rasterToPage(o);
-    this.scale = 1 / Math.max(0.01, Math.hypot(m.a, m.b));
-    this.size = Math.max(1, S.ui.brush.size * this.scale);
-    this.dab = this.makeDab();
-  }
-  makeDab() {
-    const s = Math.ceil(this.size) + 2;
-    const c = makeCanvas(s, s);
-    const ctx = c.getContext('2d')!;
-    const r = this.size / 2;
-    const hard = this.kind === 'pencil' ? 1 : S.ui.brush.hardness;
-    const col = this.kind === 'dodge' ? '#ffffff' : this.kind === 'burn' ? '#000000' : S.ui.fg;
-    const g = ctx.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, r);
-    g.addColorStop(0, col); g.addColorStop(Math.min(0.99, hard), col); g.addColorStop(1, col + '00');
-    ctx.fillStyle = this.kind === 'pencil' ? col : g;
-    ctx.beginPath(); ctx.arc(s / 2, s / 2, r, 0, Math.PI * 2); ctx.fill();
-    return c;
-  }
-  to(pagePt: { x: number; y: number }) {
-    const p = toRasterPx(this.o, pagePt);
-    if (this.kind === 'clone' && !this.cloneOffset) {
-      if (!cloneSrc.pt) { toast('Alt-click to set a clone source first'); return; }
-      this.cloneOffset = { x: cloneSrc.pt.x - p.x, y: cloneSrc.pt.y - p.y };
-    }
-    const from = this.last || p;
-    const d = Math.hypot(p.x - from.x, p.y - from.y);
-    const spacing = Math.max(0.5, this.size * (this.kind === 'smudge' ? 0.08 : 0.12));
-    const steps = Math.max(1, Math.ceil(d / spacing));
-    const bctx = this.buffer.getContext('2d')!;
-    for (let i = this.last ? 1 : 0; i <= steps; i++) {
-      const x = from.x + ((p.x - from.x) * i) / steps, y = from.y + ((p.y - from.y) * i) / steps;
-      const s = this.dab.width;
-      if (this.kind === 'smudge') {
-        const prev = { x: from.x + ((p.x - from.x) * (i - 1)) / steps, y: from.y + ((p.y - from.y) * (i - 1)) / steps };
-        const ctx = this.canvas.getContext('2d')!;
-        const tmp = makeCanvas(s, s);
-        const tctx = tmp.getContext('2d')!;
-        tctx.drawImage(this.canvas, prev.x - s / 2, prev.y - s / 2, s, s, 0, 0, s, s);
-        tctx.globalCompositeOperation = 'destination-in';
-        tctx.drawImage(this.dab, 0, 0);
-        ctx.save(); ctx.globalAlpha = 0.5 * S.ui.brush.opacity;
-        ctx.drawImage(tmp, x - s / 2, y - s / 2);
-        ctx.restore();
-      } else if (this.kind === 'clone' && this.cloneOffset) {
-        const tmp = makeCanvas(s, s);
-        const tctx = tmp.getContext('2d')!;
-        tctx.drawImage(this.before, x + this.cloneOffset.x - s / 2, y + this.cloneOffset.y - s / 2, s, s, 0, 0, s, s);
-        tctx.globalCompositeOperation = 'destination-in';
-        tctx.drawImage(this.dab, 0, 0);
-        bctx.drawImage(tmp, x - s / 2, y - s / 2);
-      } else {
-        bctx.globalAlpha = S.ui.brush.flow;
-        bctx.drawImage(this.dab, x - s / 2, y - s / 2);
-      }
-    }
-    this.last = p;
-    if (this.kind === 'smudge') return;
-    if (this.mask) { bctx.globalCompositeOperation = 'destination-in'; bctx.globalAlpha = 1; bctx.drawImage(this.mask, 0, 0); bctx.globalCompositeOperation = 'source-over'; }
-    const ctx = this.canvas.getContext('2d')!;
-    ctx.save();
-    ctx.globalCompositeOperation = 'copy';
-    ctx.drawImage(this.before, 0, 0);
-    ctx.globalCompositeOperation = this.kind === 'eraser' ? 'destination-out' : this.kind === 'dodge' ? 'soft-light' : this.kind === 'burn' ? 'soft-light' : 'source-over';
-    ctx.globalAlpha = S.ui.brush.opacity * (this.kind === 'dodge' || this.kind === 'burn' ? 0.6 : 1);
-    if (this.kind === 'dodge' || this.kind === 'burn') {
-      // keep transparency: only affect existing pixels
-      const t = makeCanvas(this.canvas.width, this.canvas.height);
-      const tc = t.getContext('2d')!;
-      tc.drawImage(this.buffer, 0, 0);
-      tc.globalCompositeOperation = 'destination-in';
-      tc.drawImage(this.before, 0, 0);
-      ctx.drawImage(t, 0, 0);
-    } else ctx.drawImage(this.buffer, 0, 0);
-    ctx.restore();
-  }
-  end() {
-    storeRaster(this.o, this.canvas);
-    commit();
-  }
-}
-
-import { FILTERS, runFilter } from './pixfx';
+import { FILTERS, runFilter, type FxExtra } from './pixfx';
 export { FILTERS, runFilter };
+const ALPHA_FILTERS = new Set(['coloralpha', 'dropshadow', 'clouds', 'checker']);
 
 /** A live, cancellable filter session on one raster. */
 export class Adjust {
@@ -350,8 +317,8 @@ export class Adjust {
     const m = maskFor(o);
     this.mask = m ? m.getContext('2d')!.getImageData(0, 0, m.width, m.height).data : null;
   }
-  preview(id: string, params: Record<string, number>) {
-    const res = runFilter(id, this.before, params);
+  preview(id: string, params: Record<string, number>, extra: FxExtra = {}) {
+    const res = runFilter(id, this.before, params, { fg: S.ui.fg, bg: S.ui.bg, ...extra });
     if (this.mask) {
       const b = this.before.data, r = res.data, m = this.mask;
       for (let i = 0; i < r.length; i += 4) {
@@ -360,12 +327,338 @@ export class Adjust {
         for (let k = 0; k < 4; k++) r[i + k] = b[i + k] * (1 - a) + r[i + k] * a;
       }
     }
-    // keep original alpha so filters never reveal transparent areas
+    // keep original alpha so filters never reveal transparent areas (unless the filter edits alpha itself)
     const r = res.data, b = this.before.data;
-    for (let i = 3; i < r.length; i += 4) r[i] = b[i];
+    if (!ALPHA_FILTERS.has(id)) for (let i = 3; i < r.length; i += 4) r[i] = b[i];
     this.canvas.getContext('2d')!.putImageData(res, 0, 0);
     emit();
   }
   cancel() { this.canvas.getContext('2d')!.putImageData(this.before, 0, 0); emit(); }
-  apply() { storeRaster(this.o, this.canvas); commit(); }
+  apply(label = 'Filter') { storeRaster(this.o, this.canvas); commit(label); }
+}
+
+
+// ======================================================================
+// Selection tools beyond the basics
+// ======================================================================
+const maskData = () => { const m = GS.mask!; return m.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, m.width, m.height); };
+
+export function selectByColour(p: { x: number; y: number }, mode = S.ui.selMode) {
+  const c = compositePage();
+  const img = c.getContext('2d')!.getImageData(0, 0, c.width, c.height);
+  const region = matchAll(img.data, c.width, c.height, Math.floor(p.x), Math.floor(p.y), S.ui.tolerance);
+  const m = makeCanvas(c.width, c.height), mc = m.getContext('2d')!, md = mc.createImageData(c.width, c.height);
+  for (let i = 0; i < region.length; i++) if (region[i]) md.data[i * 4] = md.data[i * 4 + 1] = md.data[i * 4 + 2] = md.data[i * 4 + 3] = 255;
+  mc.putImageData(md, 0, 0);
+  combineSelection(m, mode);
+}
+
+export function selectFromAlpha(o: Obj, mode: typeof S.ui.selMode = 'replace') {
+  const pg = page();
+  const t = editTime();
+  const c = renderObjectsToCanvas([o], { x: 0, y: 0, w: pg.w, h: pg.h }, t);
+  const cc = c.getContext('2d')!, d = cc.getImageData(0, 0, c.width, c.height);
+  for (let i = 0; i < d.data.length; i += 4) { const a = d.data[i + 3]; d.data[i] = d.data[i + 1] = d.data[i + 2] = 255; d.data[i + 3] = a; }
+  cc.putImageData(d, 0, 0);
+  combineSelection(c, mode);
+}
+
+export function selectFromShapes() {
+  const objs = page().objects.filter(o => S.ui.sel.includes(o.id) && ['rect', 'ellipse', 'star', 'path'].includes(o.type));
+  if (!objs.length) { toast('Select one or more vector shapes first (draw them in Ink)'); return; }
+  const t = editTime(), path = new Path2D();
+  for (const o of objs) path.addPath(objPath2D(o), objMatrix(o, t));
+  selectShape(path, 'replace');
+}
+
+function morph(n: number, grow: boolean) {
+  const m = GS.mask!;
+  const tmp = makeCanvas(m.width, m.height), tc = tmp.getContext('2d', { willReadFrequently: true })!;
+  tc.filter = `blur(${Math.max(0.5, n)}px)`; tc.drawImage(m, 0, 0); tc.filter = 'none';
+  const d = tc.getImageData(0, 0, tmp.width, tmp.height);
+  const th = grow ? 6 : 249;
+  for (let i = 0; i < d.data.length; i += 4) { const on = d.data[i + 3] > th; d.data[i] = d.data[i + 1] = d.data[i + 2] = 255; d.data[i + 3] = on ? 255 : 0; }
+  tc.putImageData(d, 0, 0);
+  return tmp;
+}
+export function growSelection(n: number) { if (!hasSelection()) return toast('Make a selection first'); GS.mask = morph(n, true); refreshSelection(); }
+export function shrinkSelection(n: number) { if (!hasSelection()) return toast('Make a selection first'); GS.mask = morph(n, false); refreshSelection(); }
+export function featherSelection(n: number) {
+  if (!hasSelection()) return toast('Make a selection first');
+  const m = GS.mask!, tmp = makeCanvas(m.width, m.height), tc = tmp.getContext('2d')!;
+  tc.filter = `blur(${Math.max(0.5, n / 2)}px)`; tc.drawImage(m, 0, 0);
+  GS.mask = tmp; refreshSelection();
+}
+export function sharpenSelection() {
+  if (!hasSelection()) return toast('Make a selection first');
+  const d = maskData();
+  for (let i = 0; i < d.data.length; i += 4) { const on = d.data[i + 3] > 127; d.data[i] = d.data[i + 1] = d.data[i + 2] = 255; d.data[i + 3] = on ? 255 : 0; }
+  GS.mask!.getContext('2d')!.putImageData(d, 0, 0); refreshSelection();
+}
+export function borderSelection(n: number) {
+  if (!hasSelection()) return toast('Make a selection first');
+  const outer = morph(n, true), inner = morph(n, false);
+  const oc = outer.getContext('2d')!;
+  oc.globalCompositeOperation = 'destination-out'; oc.drawImage(inner, 0, 0);
+  GS.mask = outer; refreshSelection();
+}
+
+export function selectionToPath() {
+  if (!hasSelection()) { toast('Make a selection first'); return; }
+  const m = GS.mask!, d = maskData();
+  const bin = new Uint8Array(m.width * m.height);
+  for (let i = 0; i < bin.length; i++) bin[i] = d.data[i * 4 + 3] > 127 ? 1 : 0;
+  const sps = maskToSubpaths(bin, m.width, m.height, 0.9, 6);
+  if (!sps.length) { toast('The selection is empty'); return; }
+  const o = newObj('path', currentLayerId(), { name: 'Selection path', subpaths: sps, fill: null, stroke: S.ui.bg, strokeWidth: 2 });
+  recentrePath(o);
+  addObj(o);
+  commit('Selection to path');
+  toast('Selection converted to an editable path. Switch to Ink to adjust it.');
+}
+
+export function strokeSelection(o: Obj, width: number, colour = S.ui.fg) {
+  if (!hasSelection()) { toast('Make a selection first'); return; }
+  const m = GS.mask!, d = maskData();
+  const bin = new Uint8Array(m.width * m.height);
+  for (let i = 0; i < bin.length; i++) bin[i] = d.data[i * 4 + 3] > 127 ? 1 : 0;
+  const sps = maskToSubpaths(bin, m.width, m.height, 0.6, 2);
+  const c = rasterCanvas(o), ctx = c.getContext('2d')!;
+  const M = rasterToPage(o).inverse();
+  ctx.save();
+  ctx.setTransform(M.a, M.b, M.c, M.d, M.e, M.f);
+  ctx.strokeStyle = colour; ctx.lineWidth = width; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.globalAlpha = S.ui.brush.opacity;
+  for (const sp of sps) {
+    ctx.beginPath();
+    sp.nodes.forEach((n, i) => { const nx = sp.nodes[(i + 1) % sp.nodes.length]; if (!i) ctx.moveTo(n.x, n.y); if (i < sp.nodes.length - 1 || sp.closed) ctx.bezierCurveTo(n.ox, n.oy, nx.ix, nx.iy, nx.x, nx.y); });
+    ctx.stroke();
+  }
+  ctx.restore();
+  storeRaster(o);
+  commit('Stroke selection');
+}
+
+/** New layer from the selected pixels of a layer (optionally removing them from the original). */
+export function layerViaCopy(o: Obj, cut = false) {
+  if (!hasSelection()) { toast('Make a selection first'); return; }
+  const b = selectionBounds();
+  if (!b) return;
+  const pg = page(), t = editTime();
+  const full = renderObjectsToCanvas([o], { x: 0, y: 0, w: pg.w, h: pg.h }, t);
+  const fc = full.getContext('2d')!;
+  fc.globalCompositeOperation = 'destination-in'; fc.drawImage(GS.mask!, 0, 0);
+  const c = makeCanvas(b.w, b.h);
+  c.getContext('2d')!.drawImage(full, -b.x, -b.y);
+  const n = newObj('raster', o.layerId, { name: `${o.name} ${cut ? 'cut' : 'copy'}`, x: b.x + b.w / 2, y: b.y + b.h / 2, w: b.w, h: b.h });
+  storeRaster(n, c);
+  const idx = pg.objects.indexOf(o);
+  pg.objects.splice(idx + 1, 0, n);
+  if (cut) fillSelection(o, '#000', true);
+  S.ui.sel = [n.id];
+  commit(cut ? 'Layer via cut' : 'Layer via copy');
+}
+
+// ---------- saved selections (channels) ----------
+export const CHANNELS: { id: string; name: string; canvas: HTMLCanvasElement; pageId: string }[] = [];
+export function saveChannel() {
+  if (!hasSelection()) { toast('Make a selection first'); return; }
+  CHANNELS.push({ id: uid('ch'), name: `Selection ${CHANNELS.length + 1}`, canvas: cloneCanvas(GS.mask!), pageId: S.ui.pageId });
+  emit(); toast('Selection saved. Load it later from the Adjust tab.');
+}
+export function loadChannel(id: string, mode = S.ui.selMode) {
+  const ch = CHANNELS.find(c => c.id === id);
+  if (!ch) return;
+  const pg = page();
+  const c = makeCanvas(pg.w, pg.h); c.getContext('2d')!.drawImage(ch.canvas, 0, 0);
+  combineSelection(c, mode);
+}
+export function deleteChannel(id: string) { const i = CHANNELS.findIndex(c => c.id === id); if (i >= 0) CHANNELS.splice(i, 1); emit(); }
+
+export function toggleQuickMask() {
+  S.ui.quickMask = !S.ui.quickMask;
+  if (S.ui.quickMask) {
+    const pg = page();
+    if (!GS.mask || GS.pageId !== pg.id) { GS.mask = makeCanvas(pg.w, pg.h); GS.pageId = pg.id; }
+    toast('Quick mask on: paint with light colours to select, dark colours or the eraser to deselect');
+  } else if (GS.mask) { if (!selectionBounds()) selectNone(); else refreshSelection(); }
+  emit();
+}
+
+// ======================================================================
+// Layers
+// ======================================================================
+const rasters = () => page().objects.filter(o => o.type === 'raster');
+
+export function addLayerMask(o: Obj, kind: 'white' | 'black' | 'selection' | 'alpha') {
+  const rc = rasterCanvas(o);
+  const c = makeCanvas(rc.width, rc.height), ctx = c.getContext('2d')!;
+  if (kind === 'white') { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); }
+  else if (kind === 'alpha') { ctx.drawImage(rc, 0, 0); const d = ctx.getImageData(0, 0, c.width, c.height); for (let i = 0; i < d.data.length; i += 4) { d.data[i] = d.data[i + 1] = d.data[i + 2] = 255; } ctx.putImageData(d, 0, 0); }
+  else if (kind === 'selection') { const m = maskFor(o); if (m) ctx.drawImage(m, 0, 0); else { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); } }
+  storeMask(o, c);
+  S.ui.maskEdit = true;
+  commit('Add layer mask');
+}
+export function deleteLayerMask(o: Obj) { delete o.maskSrc; delete o.maskRev; S.ui.maskEdit = false; commit('Delete layer mask'); }
+export function applyLayerMask(o: Obj) {
+  const mk = maskCanvas(o);
+  if (!mk) return;
+  const c = rasterCanvas(o), ctx = c.getContext('2d')!;
+  ctx.globalCompositeOperation = 'destination-in'; ctx.drawImage(mk, 0, 0, c.width, c.height); ctx.globalCompositeOperation = 'source-over';
+  delete o.maskSrc; delete o.maskRev; S.ui.maskEdit = false;
+  storeRaster(o); commit('Apply layer mask');
+}
+export function invertLayerMask(o: Obj) {
+  const mk = editableMask(o, 'white'), ctx = mk.getContext('2d')!;
+  const d = ctx.getImageData(0, 0, mk.width, mk.height);
+  for (let i = 0; i < d.data.length; i += 4) { d.data[i] = d.data[i + 1] = d.data[i + 2] = 255; d.data[i + 3] = 255 - d.data[i + 3]; }
+  ctx.putImageData(d, 0, 0); storeMask(o, mk); commit('Invert layer mask');
+}
+
+function replaceWithMerged(objs: Obj[], name: string, box?: { x: number; y: number; w: number; h: number }) {
+  const pg = page(), t = editTime();
+  const b = box || (() => { const u = unionBox(objs.map(o => pageBox(o, t)))!; return { x: Math.floor(u.x), y: Math.floor(u.y), w: Math.max(1, Math.ceil(u.w)), h: Math.max(1, Math.ceil(u.h)) }; })();
+  const c = renderObjectsToCanvas(objs, b, t);
+  const n = newObj('raster', objs[objs.length - 1].layerId, { name, x: b.x + b.w / 2, y: b.y + b.h / 2, w: b.w, h: b.h });
+  storeRaster(n, c);
+  const at = pg.objects.indexOf(objs[objs.length - 1]);
+  pg.objects = pg.objects.filter(o => !objs.includes(o));
+  pg.objects.splice(Math.min(at - (objs.length - 1), pg.objects.length), 0, n);
+  S.ui.sel = [n.id];
+  return n;
+}
+export function mergeDown(o: Obj) {
+  const list = page().objects, i = list.indexOf(o);
+  const below = list.slice(0, i).reverse().find(x => x.type === 'raster' && x.visible);
+  if (!below) { toast('There is no pixel layer below to merge into'); return; }
+  replaceWithMerged([below, o], below.name);
+  commit('Merge down');
+}
+export function mergeVisible() {
+  const rs = rasters().filter(o => o.visible);
+  if (rs.length < 2) { toast('Need two or more visible pixel layers'); return; }
+  replaceWithMerged(rs, 'Merged layers');
+  commit('Merge visible layers');
+}
+export function newFromVisible() {
+  const pg = page();
+  const c = compositePage();
+  const n = newObj('raster', S.doc.layers[S.doc.layers.length - 1].id, { name: 'Visible', x: pg.w / 2, y: pg.h / 2, w: pg.w, h: pg.h });
+  storeRaster(n, c);
+  addObj(n); commit('New layer from visible');
+}
+export function layerToImageSize(o: Obj) {
+  const pg = page();
+  const c = renderObjectsToCanvas([o], { x: 0, y: 0, w: pg.w, h: pg.h }, editTime());
+  storeRaster(o, c);
+  o.x = pg.w / 2; o.y = pg.h / 2; o.w = pg.w; o.h = pg.h; o.rotation = 0; o.sx = 1; o.sy = 1;
+  if (o.keys) for (const k of ['x', 'y', 'rotation', 'sx', 'sy'] as const) delete o.keys[k];
+  delete o.maskSrc; delete o.maskRev;
+  commit('Layer to image size');
+}
+export function autocropLayer(o: Obj) {
+  const c = rasterCanvas(o), d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+  let x0 = c.width, y0 = c.height, x1 = -1, y1 = -1;
+  for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) if (d[(y * c.width + x) * 4 + 3] > 2) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  if (x1 < 0) { toast('The layer is empty'); return; }
+  const w = x1 - x0 + 1, h = y1 - y0 + 1, n = makeCanvas(w, h);
+  n.getContext('2d')!.drawImage(c, -x0, -y0);
+  const M = rasterToPage(o);
+  const cx = x0 + w / 2, cy = y0 + h / 2;
+  const ux = (o.w || c.width) / c.width, uy = (o.h || c.height) / c.height;
+  const centre = { x: M.a * cx + M.c * cy + M.e, y: M.b * cx + M.d * cy + M.f };
+  storeRaster(o, n);
+  o.w = w * ux; o.h = h * uy; o.x = centre.x; o.y = centre.y;
+  if (o.keys) { delete o.keys.x; delete o.keys.y; }
+  delete o.maskSrc; delete o.maskRev;
+  commit('Crop layer to content');
+}
+
+// ======================================================================
+// Whole-image operations
+// ======================================================================
+function shiftKeys(o: Obj, dx: number, dy: number) {
+  o.x += dx; o.y += dy;
+  o.keys?.x?.forEach(k => (k.v += dx)); o.keys?.y?.forEach(k => (k.v += dy));
+}
+export function scaleImage(fx: number, fy: number) {
+  const pg = page();
+  if (fx <= 0 || fy <= 0) return;
+  const uniform = Math.abs(fx - fy) < 1e-6;
+  for (const o of pg.objects) {
+    o.x *= fx; o.y *= fy;
+    o.keys?.x?.forEach(k => (k.v *= fx)); o.keys?.y?.forEach(k => (k.v *= fy));
+    if (o.type === 'raster') {
+      const c = rasterCanvas(o), n = makeCanvas(Math.max(1, Math.round(c.width * fx)), Math.max(1, Math.round(c.height * fy)));
+      const x = n.getContext('2d')!; x.imageSmoothingQuality = 'high'; x.drawImage(c, 0, 0, n.width, n.height);
+      o.w = (o.w || c.width) * fx; o.h = (o.h || c.height) * fy;
+      storeRaster(o, n);
+      if (o.maskSrc) { const mk = maskCanvas(o); if (mk) { const m2 = makeCanvas(n.width, n.height); m2.getContext('2d')!.drawImage(mk, 0, 0, n.width, n.height); storeMask(o, m2); } }
+    } else if (uniform) {
+      if (['text', 'table', 'image', 'embed'].includes(o.type)) { o.w = (o.w || 0) * fx; o.h = (o.h || 0) * fx; if (o.size) o.size *= fx; if (o.gutter) o.gutter *= fx; }
+      else { o.sx *= fx; o.sy *= fx; }
+    } else if (['text', 'table', 'image', 'embed', 'rect', 'ellipse', 'star'].includes(o.type) && Math.abs(o.rotation % 90) < 0.01) { o.w = (o.w || 0) * fx; o.h = (o.h || 0) * fy; }
+    else { o.sx *= fx; o.sy *= fy; }
+  }
+  pg.w = Math.max(1, Math.round(pg.w * fx)); pg.h = Math.max(1, Math.round(pg.h * fy));
+  pg.guides = { x: pg.guides.x.map(v => v * fx), y: pg.guides.y.map(v => v * fy) };
+  selectNone();
+  for (const v of Object.values(S.ui.views)) v.fitted = false;
+  commit('Scale image');
+}
+export function canvasSize(w: number, h: number, ax = 0.5, ay = 0.5) {
+  const pg = page();
+  const dx = Math.round((w - pg.w) * ax), dy = Math.round((h - pg.h) * ay);
+  for (const o of pg.objects) shiftKeys(o, dx, dy);
+  pg.guides = { x: pg.guides.x.map(v => v + dx), y: pg.guides.y.map(v => v + dy) };
+  pg.w = Math.max(1, Math.round(w)); pg.h = Math.max(1, Math.round(h));
+  selectNone();
+  for (const v of Object.values(S.ui.views)) v.fitted = false;
+  commit('Canvas size');
+}
+export function rotateImage(deg: 90 | 180 | 270) {
+  const pg = page(), W = pg.w, H = pg.h;
+  const nw = deg === 180 ? W : H, nh = deg === 180 ? H : W;
+  const rot = (x: number, y: number) => {
+    const dx = x - W / 2, dy = y - H / 2;
+    const a = (deg * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
+    return { x: nw / 2 + dx * c - dy * s, y: nh / 2 + dx * s + dy * c };
+  };
+  for (const o of pg.objects) {
+    const p = rot(o.x, o.y);
+    o.keys?.x?.forEach((k, i) => { const q = rot(k.v, o.keys?.y?.[i]?.v ?? o.y); k.v = q.x; if (o.keys?.y?.[i]) o.keys.y[i].v = q.y; });
+    o.x = p.x; o.y = p.y; o.rotation += deg;
+  }
+  pg.w = nw; pg.h = nh; pg.guides = { x: [], y: [] };
+  selectNone();
+  for (const v of Object.values(S.ui.views)) v.fitted = false;
+  commit('Rotate image');
+}
+export function flipImage(axis: 'h' | 'v') {
+  const pg = page();
+  for (const o of pg.objects) {
+    if (axis === 'h') { o.x = pg.w - o.x; o.sx *= -1; o.rotation = -o.rotation; } else { o.y = pg.h - o.y; o.sy *= -1; o.rotation = -o.rotation; }
+    if (o.keys) { delete o.keys.x; delete o.keys.y; }
+  }
+  selectNone();
+  commit('Flip image');
+}
+export function autocropImage() {
+  const pg = page();
+  const c = renderObjectsToCanvas(pg.objects.filter(o => o.visible), { x: 0, y: 0, w: pg.w, h: pg.h }, editTime());
+  const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+  let x0 = c.width, y0 = c.height, x1 = -1, y1 = -1;
+  for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) if (d[(y * c.width + x) * 4 + 3] > 2) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  if (x1 < 0) { toast('Nothing to crop to'); return; }
+  cropPageTo({ x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 });
+}
+
+
+export function openFilter(id: string) {
+  const o = paintTarget(false);
+  if (!o) { toast('Select a pixel layer first (or rasterise a shape)'); return; }
+  S.ui.sel = [o.id];
+  S.ui.modal = { kind: 'filter', data: id };
+  emit();
 }

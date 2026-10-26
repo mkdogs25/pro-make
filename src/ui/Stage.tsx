@@ -10,7 +10,8 @@ import {
 import { renderFrame, renderPage, sceneMatrix } from '../render';
 import { layoutAll } from '../text';
 import { addObj, cloneObjects, contentMatrix, currentLayerId, editTime, fromPaper, linkFrames, paintTarget, threadHead, activeSceneClip } from '../ops';
-import { GS, Stroke, bucketFill, cropPageTo, gradientFill, magicWand, pickColour, selectNone, selectShape, setCloneSource, hasSelection, type BrushKind } from '../grain';
+import { GS, bucketFill, cropPageTo, gradientFill, magicWand, pickColour, selectNone, selectShape, selectByColour, hasSelection } from '../grain';
+import { BRUSH_TOOLS, Stroke, layerMaskTarget, quickMaskTarget, rasterTarget, setCloneSource, type BrushKind, type Target } from '../brush';
 import { importFiles, importImage, pickFiles, loadImageInto } from '../io';
 import { calligraphyPath, expandGroups, spiralPath } from '../ink';
 
@@ -31,7 +32,7 @@ type Drag =
   | { kind: 'pencil'; pts: Pt[] }
   | { kind: 'sel'; shape: 'rect' | 'ell'; start: Pt; cur: Pt; mode: typeof S.ui.selMode }
   | { kind: 'lasso'; pts: Pt[]; mode: typeof S.ui.selMode }
-  | { kind: 'paint'; stroke: Stroke }
+  | { kind: 'paint'; stroke: Stroke; timer?: number; lastPt?: Pt }
   | { kind: 'line'; start: Pt; cur: Pt; tool: 'gradient' | 'grad-ink' | 'crop' | 'measure' }
   | { kind: 'guide'; axis: 'x' | 'y'; index: number };
 
@@ -226,6 +227,12 @@ export default function Stage() {
       ctx.restore();
     }
 
+    // quick mask: the selection shown as a red wash
+    if (mode === 'grain' && S.ui.quickMask && GS.mask) {
+      const tint = document.createElement('canvas'); tint.width = GS.mask.width; tint.height = GS.mask.height;
+      const tc = tint.getContext('2d')!; tc.drawImage(GS.mask, 0, 0); tc.globalCompositeOperation = 'source-in'; tc.fillStyle = 'rgba(230,50,70,0.5)'; tc.fillRect(0, 0, tint.width, tint.height);
+      ctx.save(); ctx.setTransform(dpr * m.a, dpr * m.b, dpr * m.c, dpr * m.d, dpr * m.e, dpr * m.f); ctx.drawImage(tint, 0, 0); ctx.restore();
+    }
     // selection
     const selObjs = pg.objects.filter(o => S.ui.sel.includes(o.id));
     if (selObjs.length && tool !== 'node' && !(S.ui.editingText)) {
@@ -331,7 +338,7 @@ export default function Stage() {
       if (s.y !== undefined) { const a = sp({ x: 0, y: s.y }); ctx.beginPath(); ctx.moveTo(0, a.y); ctx.lineTo(size.w, a.y); ctx.stroke(); }
     }
     // brush cursor
-    if (mode === 'grain' && hover.current && ['brush', 'pencil', 'eraser', 'smudge', 'clone', 'dodge', 'burn'].includes(tool)) {
+    if (mode === 'grain' && hover.current && (BRUSH_TOOLS as string[]).includes(tool)) {
       const q = sp(hover.current);
       const r = (S.ui.brush.size / 2) * screenScale();
       ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.beginPath(); ctx.arc(q.x, q.y, r, 0, 7); ctx.stroke();
@@ -654,6 +661,7 @@ export default function Stage() {
       }
       case 'lasso': drag.current = { kind: 'lasso', pts: [p], mode: modsMode(e) }; return;
       case 'wand': magicWand(p, modsMode(e)); return;
+      case 'colorsel': selectByColour(p, modsMode(e)); return;
       case 'crop': drag.current = { kind: 'line', start: p, cur: p, tool: 'crop' }; return;
       case 'bucket': {
         const o = paintTarget();
@@ -661,13 +669,20 @@ export default function Stage() {
         return;
       }
     }
-    if (mode === 'grain' && ['brush', 'pencil', 'eraser', 'smudge', 'clone', 'dodge', 'burn'].includes(tool)) {
-      const o = paintTarget();
-      if (!o) return;
-      if (tool === 'clone' && e.altKey) { setCloneSource(o, p); return; }
-      const st = new Stroke(o, tool as BrushKind);
-      st.to(p);
-      drag.current = { kind: 'paint', stroke: st };
+    if (mode === 'grain' && (BRUSH_TOOLS as string[]).includes(tool)) {
+      let target: Target;
+      if (S.ui.quickMask) target = quickMaskTarget();
+      else {
+        const o = paintTarget();
+        if (!o) return;
+        target = S.ui.maskEdit && o.maskSrc ? layerMaskTarget(o) : rasterTarget(o);
+      }
+      if ((tool === 'clone' || tool === 'heal') && e.altKey) { setCloneSource(target, p); return; }
+      const st = new Stroke(target, tool as BrushKind);
+      st.to(p, e.pointerType === 'pen' ? e.pressure : 1);
+      const dd: Drag = { kind: 'paint', stroke: st, lastPt: p };
+      if (tool === 'airbrush') dd.timer = window.setInterval(() => { if (dd.lastPt) { st.to(dd.lastPt, 1); stageApi.redraw(); } }, 45);
+      drag.current = dd;
       stageApi.redraw();
     }
   };
@@ -783,7 +798,7 @@ export default function Stage() {
         if (e.shiftKey) { const dx = p.x - d.start.x, dy = p.y - d.start.y, L = Math.hypot(dx, dy), a = Math.round(Math.atan2(dy, dx) / (Math.PI / 12)) * (Math.PI / 12); d.cur = { x: d.start.x + Math.cos(a) * L, y: d.start.y + Math.sin(a) * L }; }
         break;
       }
-      case 'paint': d.stroke.to(p); break;
+      case 'paint': d.lastPt = p; d.stroke.to(p, e.pointerType === 'pen' ? e.pressure : 1); break;
       case 'guide': {
         const v = d.axis === 'x' ? p.x : p.y;
         pg.guides[d.axis][d.index] = v;
@@ -896,7 +911,7 @@ export default function Stage() {
         selectShape(path, d.mode);
         return;
       }
-      case 'paint': d.stroke.end(); return;
+      case 'paint': window.clearInterval(d.timer); d.stroke.end(); return;
       case 'line': {
         if (dist(d.start, d.cur) * screenScale() < 3) { emit(); return; }
         if (d.tool === 'crop') { cropPageTo(rectOf(d.start, d.cur)); return; }
@@ -1040,7 +1055,7 @@ export default function Stage() {
   }
 
   const cursor = tool === 'hand' ? 'grab' : tool === 'zoom' ? 'zoom-in' : ['pen', 'pencil', 'rect', 'ellipse', 'star', 'rectsel', 'ellsel', 'lasso', 'crop', 'gradient'].includes(tool) ? 'crosshair'
-    : tool === 'text' ? 'text' : ['brush', 'eraser', 'smudge', 'clone', 'dodge', 'burn'].includes(tool) && mode === 'grain' ? 'none' : tool === 'pencil' && mode === 'grain' ? 'none' : tool === 'eyedropper' || tool === 'bucket' || tool === 'wand' ? 'crosshair' : 'default';
+    : tool === 'text' ? 'text' : (BRUSH_TOOLS as string[]).includes(tool) && mode === 'grain' ? 'none' : tool === 'eyedropper' || tool === 'bucket' || tool === 'wand' ? 'crosshair' : 'default';
 
   return (
     <div className="stage" ref={wrap}
@@ -1059,7 +1074,9 @@ export default function Stage() {
         onDoubleClick={onDouble} onWheel={onWheel} onContextMenu={e => e.preventDefault()} />
       {editor}
       {mode === 'motion' && activeSceneClip() && <div className="stage-badge">{S.ui.autoKey ? '● Auto-key on: moves create keyframes' : 'Auto-key off'}</div>}
-      {mode === 'grain' && hasSelection() && <div className="stage-badge">Selection active · Ctrl+Shift+A to deselect</div>}
+      {mode === 'grain' && S.ui.quickMask && <div className="stage-badge">Quick mask · light colours select, dark colours deselect · press Q to finish</div>}
+      {mode === 'grain' && !S.ui.quickMask && S.ui.maskEdit && <div className="stage-badge">Editing a layer mask · light reveals, dark hides</div>}
+      {mode === 'grain' && !S.ui.quickMask && !S.ui.maskEdit && hasSelection() && <div className="stage-badge">Selection active · Ctrl+Shift+A to deselect</div>}
     </div>
   );
 }
