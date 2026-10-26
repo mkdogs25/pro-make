@@ -9,7 +9,7 @@ import { Num, Slider, Select, Section, Row, Text, ColourInput, PaintField, IconB
 import { Icon } from './icons';
 import { layoutAll } from '../text';
 import { rasterCanvas } from '../raster';
-import { EffectsSection, MarkerSection, GroupSection, TransformSection, PathExtras, NodeSection, TextPathSection, TextExtras, TableProps, ImageProps } from './InkProps';
+import { EffectsSection, MarkerSection, GroupSection, TransformSection, PathExtras, NodeSection, TextPathSection, TextExtras, TableProps, ImageProps, LayoutSection } from './InkProps';
 
 const live = () => emit();
 
@@ -162,6 +162,7 @@ function ObjectProps({ objs }: { objs: Obj[] }) {
       </Section>
 
       {(mode === 'ink' || mode === 'print') && <GroupSection objs={objs} />}
+      {mode === 'print' && <LayoutSection objs={objs} />}
       {(mode === 'ink' || mode === 'print') && <TransformSection />}
       {(mode === 'ink' || mode === 'print') && shapes.length > 0 && (
         <Section title="Path">
@@ -254,6 +255,7 @@ function TextProps({ objs }: { objs: Obj[] }) {
         <>
           <div className="field-label">Content{head !== o ? ' (from the first frame in the thread)' : ''}</div>
           <textarea className="text-area" value={head.text || ''} rows={4} onChange={e => { head.text = e.target.value; live(); }} onBlur={commit} onKeyDown={e => e.stopPropagation()} />
+          <button className="btn small" onClick={() => { S.ui.modal = { kind: 'story' }; emit(); }}><Icon name="frame" size={14} /> Open story editor…</button>
           <p className="muted small">Use {'{page}'} for automatic page numbers.</p>
           {lay?.overflow && <div className="note warn"><Icon name="warn" size={13} /> Text overflows this frame. Enlarge it, or use the Link tool to thread it into another frame.</div>}
           {(o.linkNext || S.doc.pages.some(p => p.objects.some(x => x.linkNext === o.id))) && (

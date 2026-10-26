@@ -75,9 +75,13 @@ export interface Obj {
   headerFill?: string | null; header?: boolean; zebra?: string | null; borderColor?: string; borderW?: number;
   // raster extras (Grain)
   maskSrc?: string; maskRev?: string; lockAlpha?: boolean;
+  // layout extras
+  wrap?: boolean; wrapPad?: number;   // text in other frames flows around this object
+  dropCap?: number;                   // lines tall (text frames)
+  href?: string;                      // link target for PDF export (https://… or #page:N)
 }
 
-export interface Layer { id: string; name: string; visible: boolean; locked: boolean; opacity: number; open?: boolean }
+export interface Layer { id: string; name: string; visible: boolean; locked: boolean; opacity: number; open?: boolean; printable?: boolean }
 
 export interface Page {
   id: string; name: string; w: number; h: number; bg: string | null;

@@ -1,7 +1,9 @@
-import type { Doc, Obj } from './model';
+import type { Doc, Obj, Page } from './model';
+import { pageBox, type Box } from './geometry';
 
 export interface Word { text: string; x: number; w: number; b: boolean; i: boolean }
-export interface Line { text: string; x: number; y: number; w: number; justify: boolean; colW: number; words: Word[]; indent: number }
+export interface Drop { ch: string; size: number; x: number; y: number; w: number; lines: number }
+export interface Line { text: string; x: number; y: number; w: number; justify: boolean; colW: number; words: Word[]; indent: number; drop?: Drop }
 export interface FrameLayout { lines: Line[]; overflow: boolean }
 
 const mctx = document.createElement('canvas').getContext('2d')!;
@@ -48,7 +50,19 @@ function tokenise(text: string, markup: boolean): Tok[] {
 /** Lay out every text frame in the doc, flowing threaded chains across frames (and pages). */
 export function layoutAll(doc: Doc): Map<string, FrameLayout> {
   const frames = doc.pages.flatMap(p => p.objects).filter(o => o.type === 'text');
-  const key = fontEpoch + JSON.stringify(frames.map(f => [f.id, f.text, f.w, f.h, f.font, f.size, f.weight, f.italic, f.lineHeight, f.columns, f.gutter, f.linkNext, f.letterSpacing, f.align, f.markup, f.indent, f.paraSpace, f.valign, f.wordSpacing, f.textPath]));
+  const wrappers = doc.pages.flatMap(p => p.objects).filter(o => o.wrap && o.visible);
+  const key = fontEpoch + JSON.stringify(frames.map(f => [f.id, f.text, f.w, f.h, f.x, f.y, f.rotation, f.font, f.size, f.weight, f.italic, f.lineHeight, f.columns, f.gutter, f.linkNext, f.letterSpacing, f.align, f.markup, f.indent, f.paraSpace, f.valign, f.wordSpacing, f.textPath, f.dropCap]))
+    + JSON.stringify(wrappers.map(o => [o.id, o.x, o.y, o.w, o.h, o.rotation, o.sx, o.sy, o.wrapPad, o.subpaths?.length, o.keys ? 1 : 0]));
+  const pageOf = new Map<string, Page>();
+  for (const pg of doc.pages) for (const o of pg.objects) pageOf.set(o.id, pg);
+  const obstacles = (f: Obj): Box[] => {
+    const pg = pageOf.get(f.id);
+    if (!pg || Math.abs(f.rotation) > 0.01) return [];
+    return pg.objects.filter(o => o.wrap && o.visible && o.id !== f.id).map(o => {
+      const b = pageBox(o, 0), pad = o.wrapPad ?? 8;
+      return { x: b.x - pad - f.x, y: b.y - pad - f.y, w: b.w + pad * 2, h: b.h + pad * 2 };
+    });
+  };
   if (key === cacheKey) return cache;
   const byId = new Map(frames.map(f => [f.id, f]));
   const targets = new Set(frames.map(f => f.linkNext).filter(Boolean) as string[]);
@@ -58,14 +72,14 @@ export function layoutAll(doc: Doc): Map<string, FrameLayout> {
     const chain: Obj[] = [];
     const seen = new Set<string>();
     for (let f: Obj | undefined = head; f && !seen.has(f.id); f = f.linkNext ? byId.get(f.linkNext) : undefined) { seen.add(f.id); chain.push(f); }
-    flow(head, chain, out);
+    flow(head, chain, out, obstacles);
   }
-  for (const f of frames) if (!out.has(f.id)) flow(f, [f], out);
+  for (const f of frames) if (!out.has(f.id)) flow(f, [f], out, obstacles);
   cacheKey = key; cache = out;
   return out;
 }
 
-function flow(head: Obj, chain: Obj[], out: Map<string, FrameLayout>) {
+function flow(head: Obj, chain: Obj[], out: Map<string, FrameLayout>, obstaclesOf: (f: Obj) => Box[]) {
   const style = head;
   const lh = (style.size || 16) * (style.lineHeight || 1.3);
   const toks = tokenise(head.text || '', !!head.markup);
@@ -73,7 +87,20 @@ function flow(head: Obj, chain: Obj[], out: Map<string, FrameLayout>) {
   const indent = head.indent || 0, paraSpace = head.paraSpace || 0;
   let ti = 0;
   let newPara = true;
+  // drop cap: lift the first letter out of the text and indent the first lines
+  let drop: Drop | null = null;
+  const dc = Math.round(head.dropCap || 0);
+  if (dc >= 2 && toks.length && !toks[0].br && toks[0].w.length) {
+    const ch = toks[0].w[0];
+    const dsize = ((dc - 1) * lh + (head.size || 16) * 0.72) / 0.72;
+    const w = measure(ch, { ...head, size: dsize, weight: Math.max(700, head.weight || 400), letterSpacing: 0 } as Obj, false, false) + (head.size || 16) * 0.25;
+    toks[0] = { ...toks[0], w: toks[0].w.slice(1) };
+    if (!toks[0].w) toks.shift();
+    drop = { ch, size: dsize, x: 0, y: 0, w, lines: dc };
+  }
+  let dropLeft = 0;
   for (const f of chain) {
+    const obst = obstaclesOf(f);
     const lines: Line[] = [];
     const cols = Math.max(1, f.columns || 1), gut = f.gutter || 0;
     const fw = f.w!, fh = f.h!;
@@ -82,8 +109,21 @@ function flow(head: Obj, chain: Obj[], out: Map<string, FrameLayout>) {
       const cx = -fw / 2 + c * (colW + gut);
       let y = -fh / 2;
       while (ti < toks.length && y + lh <= fh / 2 + 0.5) {
-        const ind = newPara ? indent : 0;
-        const avail = colW - ind;
+        let ind = newPara ? indent : 0;
+        let x0 = cx, wCol = colW;
+        // text wrap: use the widest free stretch of this line that no object covers
+        const blockers = obst.filter(b => b.y < y + lh && b.y + b.h > y && b.x < cx + colW && b.x + b.w > cx);
+        if (blockers.length) {
+          let segs: [number, number][] = [[cx, cx + colW]];
+          for (const b of blockers) segs = segs.flatMap(([a, z]) => ([[a, Math.min(z, b.x)], [Math.max(a, b.x + b.w), z]] as [number, number][]).filter(([a2, z2]) => z2 - a2 > 1));
+          segs.sort((a, b) => b[1] - b[0] - (a[1] - a[0]));
+          if (!segs.length || segs[0][1] - segs[0][0] < 36) { y += lh; continue; }
+          x0 = segs[0][0]; wCol = segs[0][1] - segs[0][0];
+        }
+        let firstDrop: Drop | undefined;
+        if (drop && f === chain[0] && c === 0 && !lines.length) { dropLeft = drop.lines; firstDrop = { ...drop, x: cx, y }; }
+        if (dropLeft > 0) { ind += drop!.w; dropLeft--; }
+        const avail = wCol - ind;
         const words: { t: string; w: number; b: boolean; i: boolean }[] = [];
         let lw = 0, ended = false;
         while (ti < toks.length) {
@@ -109,13 +149,13 @@ function flow(head: Obj, chain: Obj[], out: Map<string, FrameLayout>) {
         // position words
         const align = style.align || 'left';
         let gap = space;
-        let x = cx + ind;
+        let x = x0 + ind;
         if (align === 'justify' && justify && words.length > 1) gap = (avail - words.reduce((s, w) => s + w.w, 0)) / (words.length - 1);
-        else if (align === 'center') x = cx + ind + (avail - lw) / 2;
-        else if (align === 'right' || align === 'end') x = cx + ind + (avail - lw);
+        else if (align === 'center') x = x0 + ind + (avail - lw) / 2;
+        else if (align === 'right' || align === 'end') x = x0 + ind + (avail - lw);
         const placed: Word[] = [];
         for (const w of words) { placed.push({ text: w.t, x, w: w.w, b: w.b, i: w.i }); x += w.w + gap; }
-        lines.push({ text: words.map(w => w.t).join(' '), x: cx, y, w: lw, justify, colW, words: placed, indent: ind });
+        lines.push({ text: words.map(w => w.t).join(' '), x: x0, y, w: lw, justify, colW: wCol, words: placed, indent: ind, drop: firstDrop });
         y += lh;
         newPara = ended;
         if (ended && paraSpace) y += paraSpace;
@@ -145,6 +185,17 @@ export function drawTextLines(ctx: CanvasRenderingContext2D, o: Obj, lay: FrameL
     for (const ch of s) { if (stroke) ctx.strokeText(ch, x, y); ctx.fillText(ch, x, y); x += ctx.measureText(ch).width + ls; }
   };
   for (const l of lay.lines) {
+    if (l.drop) {
+      const d = l.drop;
+      ctx.save();
+      ctx.font = fontString({ ...o, size: d.size, weight: Math.max(700, o.weight || 400) } as Obj);
+      ctx.textBaseline = 'alphabetic';
+      const base = d.y + (d.lines - 1) * lh + pad + (o.size || 16) * 0.82;
+      if (stroke) ctx.strokeText(d.ch, d.x, base);
+      ctx.fillText(d.ch, d.x, base);
+      ctx.restore();
+      ctx.textBaseline = 'top';
+    }
     const y = l.y + pad;
     if (l.text.includes('{page}')) {
       ctx.font = fontString(o);

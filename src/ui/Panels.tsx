@@ -96,6 +96,7 @@ export function LayersPanel() {
         const l = S.doc.layers.find(x => x.id === active);
         return l ? (
           <div className="pad">
+            <label className="check"><input type="checkbox" checked={l.printable !== false} onChange={e => { l.printable = e.target.checked; commit(); }} /> Print and export this layer</label>
             <label className="slider-inline"><span className="muted small">Layer opacity</span>
               <input type="range" min={0} max={100} value={Math.round(l.opacity * 100)} onChange={e => { l.opacity = +e.target.value / 100; emit(); }} onPointerUp={commit} />
             </label>

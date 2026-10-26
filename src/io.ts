@@ -1,9 +1,10 @@
 import P from 'paper';
 import { jsPDF } from 'jspdf';
+import { svg2pdf } from 'svg2pdf.js';
 import { S, T, commit, emit, page, replaceDoc, toast, afterCommit } from './store';
 import type { Doc, Obj, Page, Paint } from './model';
 import { newObj, isPattern } from './model';
-import { anim, localBox, mapNodes, markerPaths, objMatrix, objSubpaths, subpathsToD } from './geometry';
+import { anim, localBox, mapNodes, markerPaths, objMatrix, objSubpaths, pageBox, subpathsToD, unionBox } from './geometry';
 import { renderFrame, renderPage, tableGeometry, timelineDuration } from './render';
 import { imageFor, makeCanvas, maskCanvas, rasterCanvas, storeRaster } from './raster';
 import { mediaBlobs, probeMedia } from './media';
@@ -255,7 +256,7 @@ export function exportPNG(scale = 2) {
   const c = makeCanvas(pg.w * scale, pg.h * scale);
   const ctx = c.getContext('2d')!;
   ctx.scale(scale, scale);
-  renderPage(ctx, S.doc, pg, { time: editTime() });
+  renderPage(ctx, S.doc, pg, { time: editTime(), print: true });
   c.toBlob(b => b && download(b, `${safe(pg.name)}.png`));
 }
 
@@ -264,7 +265,7 @@ export function exportJPEG(quality = 0.92) {
   const c = makeCanvas(pg.w, pg.h);
   const ctx = c.getContext('2d')!;
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, pg.w, pg.h);
-  renderPage(ctx, S.doc, pg, { time: editTime() });
+  renderPage(ctx, S.doc, pg, { time: editTime(), print: true });
   c.toBlob(b => b && download(b, `${safe(pg.name)}.jpg`), 'image/jpeg', quality);
 }
 
@@ -309,7 +310,7 @@ function pageSVGBody(doc: Doc, pg: Page, t: number, defs: string[], depth = 0): 
   let out = pg.bg ? `<rect width="${pg.w}" height="${pg.h}" fill="${pg.bg}"/>` : '';
   const xf = (o: Obj) => { const a = anim(o, t); return `translate(${a.x} ${a.y}) rotate(${a.rotation}) scale(${a.sx} ${a.sy})`; };
   for (const layer of doc.layers) {
-    if (!layer.visible) continue;
+    if (!layer.visible || layer.printable === false) continue;
     out += `<g id="${esc(layer.name)}" opacity="${layer.opacity}">`;
     for (const src of srcs) for (const o of src.objects) {
       if (o.layerId !== layer.id || !o.visible || o.isClip) continue;
@@ -343,12 +344,13 @@ function pageSVGBody(doc: Doc, pg: Page, t: number, defs: string[], depth = 0): 
         const fill = svgPaint(o.fill, defs, `g${o.id}f`, o);
         const strokeAttr = typeof o.stroke === 'string' && o.strokeWidth > 0 ? ` stroke="${o.stroke}" stroke-width="${o.strokeWidth}" paint-order="stroke"` : '';
         const lines = (lay?.lines || []).map(l => {
+          const dropSvg = l.drop ? `<text x="${l.drop.x}" y="${l.drop.y + (l.drop.lines - 1) * lh + (lh - (o.size || 16)) / 2 + (o.size || 16) * 0.82}" font-size="${l.drop.size}" font-weight="700">${esc(l.drop.ch)}</text>` : '';
           if (l.text.includes('{page}')) {
             const x = o.align === 'center' ? l.x + l.colW / 2 : o.align === 'right' ? l.x + l.colW : l.x + l.indent;
             const anchor = o.align === 'center' ? 'middle' : o.align === 'right' ? 'end' : 'start';
             return `<text x="${x}" y="${l.y + lh / 2}" dominant-baseline="middle" text-anchor="${anchor}">${esc(l.text.replace(/\{page\}/g, String(pn)))}</text>`;
           }
-          return l.words.map(w => `<text x="${w.x}" y="${l.y + lh / 2}" dominant-baseline="middle"${w.b ? ' font-weight="700"' : ''}${w.i ? ' font-style="italic"' : ''}>${esc(w.text)}</text>`).join('');
+          return dropSvg + l.words.map(w => `<text x="${w.x}" y="${l.y + lh / 2}" dominant-baseline="middle"${w.b ? ' font-weight="700"' : ''}${w.i ? ' font-style="italic"' : ''}>${esc(w.text)}</text>`).join('');
         }).join('');
         piece = `<g ${common} fill="${fill}"${strokeAttr} font-family="${esc(o.font || 'Inter')}" font-size="${o.size}" font-weight="${o.weight || 400}" font-style="${o.italic ? 'italic' : 'normal'}" letter-spacing="${o.letterSpacing || 0}">` +
           (o.frameFill ? `<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" fill="${o.frameFill}"/>` : '') + lines + '</g>';
@@ -422,33 +424,113 @@ function pageSVGBody(doc: Doc, pg: Page, t: number, defs: string[], depth = 0): 
   return out;
 }
 
-export function pageToSVG(pg: Page = page(), t = editTime()): string {
+export function pageToSVG(pg: Page = page(), t = editTime(), box?: { x: number; y: number; w: number; h: number }): string {
   const defs: string[] = [];
   const body = pageSVGBody(S.doc, pg, t, defs);
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${pg.w}" height="${pg.h}" viewBox="0 0 ${pg.w} ${pg.h}"><defs>${defs.join('')}</defs>${body}</svg>`;
+  const vb = box || { x: 0, y: 0, w: pg.w, h: pg.h };
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${vb.w}" height="${vb.h}" viewBox="${vb.x} ${vb.y} ${vb.w} ${vb.h}"><defs>${defs.join('')}</defs>${body}</svg>`;
 }
 export function exportSVG() { download(new Blob([pageToSVG()], { type: 'image/svg+xml' }), `${safe(page().name)}.svg`); }
 
-export async function exportPDF(allPages = true) {
-  const pages = allPages ? S.doc.pages.filter(p => !p.isMaster) : [page()];
+export interface PdfOpts { scope: 'all' | 'current'; ppi: number; bleed: boolean; marks: boolean; vector: boolean; grey: boolean; bookmarks: boolean; links: boolean }
+export const defaultPdfOpts: PdfOpts = { scope: 'all', ppi: 300, bleed: false, marks: false, vector: false, grey: false, bookmarks: true, links: true };
+
+const pdfFont = (f: string) => /courier|mono|code/i.test(f) ? 'courier' : /fraunces|lora|playfair|georgia|serif|times/i.test(f) ? 'times' : 'helvetica';
+
+export async function exportPDF(arg: Partial<PdfOpts> | boolean = {}) {
+  const opts: PdfOpts = { ...defaultPdfOpts, ...(typeof arg === 'boolean' ? { scope: arg ? 'all' : 'current' } : arg) };
+  const pages = opts.scope === 'all' ? S.doc.pages.filter(p => !p.isMaster) : [page()];
   toast(`Rendering ${pages.length} page${pages.length > 1 ? 's' : ''} to PDF…`);
   await new Promise(r => setTimeout(r, 30));
   let pdf: jsPDF | null = null;
-  for (const pg of pages) {
-    const wPt = pg.w * 0.75, hPt = pg.h * 0.75;
+  const nonMaster = S.doc.pages.filter(p => !p.isMaster);
+  for (let pi = 0; pi < pages.length; pi++) {
+    const pg = pages[pi];
+    const bl = opts.bleed && !opts.vector ? pg.bleed : 0, slug = opts.marks && !opts.vector ? 30 : 0, off = bl + slug;
+    const W = pg.w + off * 2, H = pg.h + off * 2;
+    const wPt = W * 0.75, hPt = H * 0.75;
     const orient = wPt > hPt ? 'landscape' : 'portrait';
     if (!pdf) pdf = new jsPDF({ unit: 'pt', format: [wPt, hPt], orientation: orient });
     else pdf.addPage([wPt, hPt], orient);
-    const scale = 300 / 96;
-    const c = makeCanvas(pg.w * scale, pg.h * scale);
-    const ctx = c.getContext('2d')!;
-    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
-    ctx.scale(scale, scale);
-    renderPage(ctx, S.doc, pg, { time: editTime() });
-    pdf.addImage(c.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, wPt, hPt);
+    if (opts.vector) {
+      const svg = new DOMParser().parseFromString(pageToSVG(pg, 0), 'image/svg+xml').documentElement;
+      svg.querySelectorAll('[font-family]').forEach(n => n.setAttribute('font-family', pdfFont(n.getAttribute('font-family') || '')));
+      svg.querySelectorAll('text').forEach(n => n.removeAttribute('dominant-baseline'));
+      const host = document.createElement('div');
+      host.style.cssText = 'position:fixed;left:-99999px;top:0;width:10px;height:10px;overflow:hidden';
+      host.appendChild(document.importNode(svg, true));
+      document.body.appendChild(host);
+      try { await svg2pdf(host.firstElementChild as SVGElement, pdf, { x: 0, y: 0, width: pg.w * 0.75, height: pg.h * 0.75 }); }
+      finally { host.remove(); }
+    } else {
+      const scale = opts.ppi / 96;
+      const c = makeCanvas(W * scale, H * scale);
+      const ctx = c.getContext('2d')!;
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.scale(scale, scale);
+      if (bl && pg.bg) { ctx.fillStyle = pg.bg; ctx.fillRect(slug, slug, pg.w + bl * 2, pg.h + bl * 2); }
+      ctx.save(); ctx.translate(off, off);
+      renderPage(ctx, S.doc, pg, { time: 0, print: true });
+      ctx.restore();
+      if (opts.marks) {
+        ctx.strokeStyle = '#000'; ctx.lineWidth = 0.6; ctx.beginPath();
+        const len = Math.max(8, slug - bl - 6), gap = bl + 3;
+        for (const [cx, cy, sx, sy] of [[off, off, -1, -1], [off + pg.w, off, 1, -1], [off, off + pg.h, -1, 1], [off + pg.w, off + pg.h, 1, 1]] as const) {
+          ctx.moveTo(cx + sx * gap, cy); ctx.lineTo(cx + sx * (gap + len), cy);
+          ctx.moveTo(cx, cy + sy * gap); ctx.lineTo(cx, cy + sy * (gap + len));
+        }
+        ctx.stroke();
+      }
+      let out = c;
+      if (opts.grey) { out = makeCanvas(c.width, c.height); const g = out.getContext('2d')!; g.filter = 'grayscale(100%)'; g.drawImage(c, 0, 0); }
+      pdf.addImage(out.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, wPt, hPt);
+    }
+    if (opts.links) {
+      const master = pg.masterId ? S.doc.pages.find(p => p.id === pg.masterId) : null;
+      for (const o of [...(master?.objects || []), ...pg.objects]) {
+        if (!o.href || !o.visible) continue;
+        const b = pageBox(o, 0);
+        const m = /^#page:(\d+)$/.exec(o.href);
+        const dest = m ? { pageNumber: Math.min(pages.length, Math.max(1, +m[1] - (opts.scope === 'all' ? 0 : nonMaster.indexOf(pages[0])))) } : { url: o.href };
+        pdf.link((off + b.x) * 0.75, (off + b.y) * 0.75, b.w * 0.75, b.h * 0.75, dest);
+      }
+    }
+    if (opts.bookmarks) (pdf as unknown as { outline: { add: (p: unknown, t: string, o: { pageNumber: number }) => void } }).outline.add(null, pg.name, { pageNumber: pi + 1 });
   }
   pdf!.setProperties({ title: S.doc.name, creator: 'ProMake' });
   download(pdf!.output('blob'), `${safe(S.doc.name)}.pdf`);
+  toast('PDF exported');
+}
+
+// ---------- export selection ----------
+function selectionBox() {
+  const pg = page();
+  const objs = pg.objects.filter(o => S.ui.sel.includes(o.id));
+  if (!objs.length) { toast('Select something to export first'); return null; }
+  const t = editTime();
+  const b = unionBox(objs.map(o => pageBox(o, t)))!;
+  const pad = 2;
+  return { pg, t, ids: new Set(objs.map(o => o.id)), box: { x: Math.floor(b.x - pad), y: Math.floor(b.y - pad), w: Math.ceil(b.w + pad * 2), h: Math.ceil(b.h + pad * 2) } };
+}
+export function exportSelectionPNG(scale = 2) {
+  const s = selectionBox();
+  if (!s) return;
+  const keep = new Set(s.ids);
+  for (const o of s.pg.objects) if (s.ids.has(o.id) && o.clipBy) keep.add(o.clipBy);
+  const hidden = new Set(s.pg.objects.filter(o => !keep.has(o.id)).map(o => o.id));
+  const c = makeCanvas(s.box.w * scale, s.box.h * scale);
+  const ctx = c.getContext('2d')!;
+  ctx.scale(scale, scale); ctx.translate(-s.box.x, -s.box.y);
+  renderPage(ctx, S.doc, s.pg, { time: s.t, hidden, noBg: true, print: true });
+  c.toBlob(b => b && download(b, `${safe(S.doc.name)}-selection.png`));
+}
+export function exportSelectionSVG() {
+  const s = selectionBox();
+  if (!s) return;
+  const keep = new Set(s.ids);
+  for (const o of s.pg.objects) if (s.ids.has(o.id) && o.clipBy) keep.add(o.clipBy);
+  const pg2: Page = { ...s.pg, bg: null, objects: s.pg.objects.filter(o => keep.has(o.id)), masterId: null };
+  download(new Blob([pageToSVG(pg2, s.t, s.box)], { type: 'image/svg+xml' }), `${safe(S.doc.name)}-selection.svg`);
 }
 
 // ---------- video export ----------

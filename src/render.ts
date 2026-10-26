@@ -6,7 +6,7 @@ import { drawTextLines, fontString, layoutAll } from './text';
 import { mediaEl } from './media';
 import { applyClipFilters } from './clipfx';
 
-export interface RenderOpts { time: number; hidden?: Set<string>; depth?: number; noBg?: boolean; lookup?: Map<string, Obj> }
+export interface RenderOpts { time: number; hidden?: Set<string>; depth?: number; noBg?: boolean; lookup?: Map<string, Obj>; print?: boolean }
 
 // ---------- paints ----------
 const patCache = new Map<string, CanvasPattern>();
@@ -75,7 +75,7 @@ export function renderPage(ctx: CanvasRenderingContext2D, doc: Doc, page: Page, 
   for (const s of sources) for (const o of s.objects) lookup.set(o.id, o);
   const o2 = { ...opts, lookup };
   for (const layer of doc.layers) {
-    if (!layer.visible) continue;
+    if (!layer.visible || (opts.print && layer.printable === false)) continue;
     for (const src of sources) for (const o of src.objects) {
       const lid = doc.layers.some(l => l.id === o.layerId) ? o.layerId : doc.layers[0].id;
       if (lid !== layer.id || !o.visible || o.isClip || opts.hidden?.has(o.id)) continue;

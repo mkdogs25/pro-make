@@ -162,6 +162,7 @@ export function TextExtras({ objs }: { objs: Obj[] }) {
         <Select value={o.valign || 'top'} options={[{ value: 'top', label: 'Top' }, { value: 'middle', label: 'Middle' }, { value: 'bottom', label: 'Bottom' }]} onChange={v => { each(x => (x.valign = v)); commit(); }} title="Vertical alignment" />
       </div>
       <label className="check"><input type="checkbox" checked={!!o.markup} onChange={e => { each(x => (x.markup = e.target.checked)); commit(); }} /> Rich text: **bold** and *italic*</label>
+      <Row label="Drop cap"><Num value={o.dropCap || 0} min={0} max={6} width={80} onChange={v => each(x => (x.dropCap = Math.round(v)))} onCommit={commit} /><span className="muted small">lines (0 = off)</span></Row>
       <Row label="Outline">
         <Num value={o.strokeWidth || 0} min={0} step={0.5} width={70} onChange={v => each(x => { x.strokeWidth = v; if (v && !x.stroke) x.stroke = S.ui.bg; })} onCommit={commit} />
         {typeof o.stroke === 'string' && <ColourInput value={o.stroke} onChange={c => each(x => (x.stroke = c))} onCommit={commit} />}
@@ -231,6 +232,21 @@ export function ImageProps({ o }: { o: Obj }) {
       <Row label="Background"><ColourInput value={typeof o.fill === 'string' ? o.fill : '#EFE6D2'} onChange={c => { o.fill = c; live(); }} onCommit={commit} />
         <IconBtn icon="x" title="No background" onClick={() => { o.fill = null; commit(); }} /></Row>
       <p className="muted small">Use the pan controls to reposition the picture inside the frame; the frame itself resizes with the selection handles.</p>
+    </Section>
+  );
+}
+
+export function LayoutSection({ objs }: { objs: Obj[] }) {
+  const o = objs[0];
+  const each = (f: (x: Obj) => void) => { objs.filter(isEditable).forEach(f); live(); };
+  return (
+    <Section title="Wrap & link" open={!!o.wrap || !!o.href}>
+      <label className="check"><input type="checkbox" checked={!!o.wrap} onChange={e => { each(x => (x.wrap = e.target.checked)); commit(); }} /> Text flows around this object</label>
+      {o.wrap && <Num label="Distance" value={o.wrapPad ?? 8} min={0} unit="px" onChange={v => each(x => (x.wrapPad = v))} onCommit={commit} />}
+      <Row label="Link">
+        <input className="text-input" placeholder="https://… or #page:3" value={o.href || ''} onChange={e => each(x => (x.href = e.target.value || undefined))} onBlur={commit} onKeyDown={e => e.stopPropagation()} />
+      </Row>
+      <p className="muted small">Wrap works for text frames that aren&apos;t rotated. Links become clickable areas in exported PDFs.</p>
     </Section>
   );
 }

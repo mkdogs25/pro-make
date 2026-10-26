@@ -12,12 +12,14 @@ import Timeline from './ui/Timeline';
 import { ColourPanel } from './ui/ColourPanel';
 import { SymbolsPanel } from './ui/SymbolsPanel';
 import { TraceModal, TilesModal } from './ui/InkModals';
+import { FindModal, StoryModal, DocInfoModal, PdfModal, TocModal } from './ui/PrintModals';
 import { copySel, cutSel, paste, duplicate, deleteSelection, deleteClip, splitClip, editTime, booleanOp, zorder } from './ops';
-import { saveProject, openProject, importFiles, pickFiles, exportPNG, exportJPEG, exportSVG, exportPDF, exportVideo, exportState, newDocument, restoreAutosave, startAutosave } from './io';
+import { saveProject, openProject, importFiles, pickFiles, exportPNG, exportJPEG, exportSVG, exportPDF, exportSelectionPNG, exportSelectionSVG, exportVideo, exportState, newDocument, restoreAutosave, startAutosave } from './io';
 import { togglePlay, seek, pause } from './playback';
 import { groupSel, ungroupSel } from './ink';
 import { FILTERS, Adjust, selectAllPixels, selectNone, invertSelection, fillSelection, hasSelection } from './grain';
 import { setProp, anim } from './geometry';
+import { imageFor } from './raster';
 import { layoutAll, invalidateText } from './text';
 import { duration } from './ops';
 
@@ -57,6 +59,24 @@ function TopBar() {
       <div className="top-actions">
         <IconBtn icon="undo" title="Undo (Ctrl+Z)" onClick={undo} disabled={!canUndo()} />
         <IconBtn icon="redo" title="Redo (Ctrl+Shift+Z)" onClick={redo} disabled={!canRedo()} />
+        <Menu label="Edit" icon="sliders" align="right" items={[
+          { label: 'Undo', icon: 'undo', kbd: 'Ctrl+Z', onClick: undo, disabled: !canUndo() },
+          { label: 'Redo', icon: 'redo', kbd: 'Ctrl+Shift+Z', onClick: redo, disabled: !canRedo() },
+          'sep',
+          { label: 'Cut', icon: 'scissors', kbd: 'Ctrl+X', onClick: cutSel },
+          { label: 'Copy', icon: 'copy', kbd: 'Ctrl+C', onClick: copySel },
+          { label: 'Paste', icon: 'download', kbd: 'Ctrl+V', onClick: () => paste() },
+          { label: 'Duplicate', icon: 'copy', kbd: 'Ctrl+D', onClick: duplicate },
+          { label: 'Select all', icon: 'rect', kbd: 'Ctrl+A', onClick: () => { S.ui.sel = page().objects.filter(o => !o.locked && o.visible).map(o => o.id); emit(); } },
+          'sep',
+          { label: 'Group', icon: 'group', kbd: 'Ctrl+G', onClick: groupSel },
+          { label: 'Ungroup', icon: 'group', kbd: 'Ctrl+Shift+G', onClick: ungroupSel },
+          'sep',
+          { label: 'Find & replace…', icon: 'type', kbd: 'Ctrl+F', onClick: () => { S.ui.modal = { kind: 'find' }; emit(); } },
+          { label: 'Story editor…', icon: 'frame', onClick: () => { if (selected().some(o => o.type === 'text')) { S.ui.modal = { kind: 'story' }; emit(); } else toast('Select a text frame first'); } },
+          { label: 'Insert table of contents…', icon: 'menu', onClick: () => { S.ui.modal = { kind: 'toc' }; emit(); } },
+          { label: 'Document info…', icon: 'file', onClick: () => { S.ui.modal = { kind: 'docinfo' }; emit(); } },
+        ]} />
         <Menu label="File" icon="file" align="right" items={[
           { label: 'New document', icon: 'file', onClick: () => { if (confirm('Start a new document? Unsaved changes will be lost.')) newDocument(); } },
           { label: 'Open project…', icon: 'upload', kbd: 'Ctrl+O', onClick: () => openProject() },
@@ -68,8 +88,9 @@ function TopBar() {
           { label: mode === 'motion' ? 'Current frame as PNG' : 'Page as PNG (2×)', icon: 'image', kbd: 'Ctrl+E', onClick: () => exportPNG() },
           { label: 'Page as JPEG', icon: 'image', onClick: () => exportJPEG(), disabled: mode === 'motion' },
           { label: 'Page as SVG', icon: 'pen', onClick: exportSVG, disabled: mode === 'motion' },
-          { label: 'All pages as PDF', icon: 'pages', onClick: () => exportPDF(true) },
-          { label: 'Current page as PDF', icon: 'file', onClick: () => exportPDF(false) },
+          { label: 'PDF… (bleed, crop marks, links)', icon: 'pages', onClick: () => { S.ui.modal = { kind: 'pdf' }; emit(); } },
+          { label: 'Selection as PNG', icon: 'image', onClick: () => exportSelectionPNG(), disabled: mode === 'motion' },
+          { label: 'Selection as SVG', icon: 'pen', onClick: exportSelectionSVG, disabled: mode === 'motion' },
           'sep',
           { label: 'Render video (Motion timeline)', icon: 'film', onClick: () => { setMode('motion'); exportVideo(); } },
           'sep',
@@ -240,7 +261,7 @@ function Sidebar() {
     <aside className="sidebar">
       <div className={`side-tabs ${tabs.length > 4 ? 'many' : ''}`} role="tablist">
         {tabs.map(t => (
-          <button key={t.id} role="tab" aria-selected={tab === t.id} className={tab === t.id ? 'on' : ''} onClick={() => { S.ui.sideTab = t.id; emit(); }}>
+          <button key={t.id} role="tab" title={t.label} aria-selected={tab === t.id} className={tab === t.id ? 'on' : ''} onClick={() => { S.ui.sideTab = t.id; emit(); }}>
             <Icon name={t.icon} size={14} /> <span>{t.label}</span>
           </button>
         ))}
@@ -315,6 +336,17 @@ function Preflight() {
         const a = anim(o, 0);
         const ppi = (o.w! / (Math.abs(o.w! * a.sx) / 96)) * (96 / 96);
         if (ppi < 150) issues.push({ msg: `${where} is ${Math.round(ppi)} ppi when printed (150+ recommended)`, pageId: pg.id, id: o.id, level: 'warn' });
+      }
+      if (o.type === 'image' && !pg.isMaster) {
+        if (!o.src) issues.push({ msg: `${where} is an empty image frame`, pageId: pg.id, id: o.id, level: 'warn' });
+        else {
+          const im = imageFor(o.src);
+          if (im.naturalWidth) {
+            const fitK = o.fit === 'fit' ? Math.min(o.w! / im.naturalWidth, o.h! / im.naturalHeight) : o.fit === 'stretch' ? o.w! / im.naturalWidth : o.fit === 'none' ? 1 : Math.max(o.w! / im.naturalWidth, o.h! / im.naturalHeight);
+            const ppi = 96 / (fitK * (o.imgScale || 1) * Math.abs(anim(o, 0).sx || 1));
+            if (ppi < 150) issues.push({ msg: `${where} is ${Math.round(ppi)} ppi when printed (150+ recommended)`, pageId: pg.id, id: o.id, level: 'warn' });
+          }
+        }
       }
       if (!pg.isMaster && o.visible) {
         const a = anim(o, 0);
@@ -401,6 +433,7 @@ function useShortcuts() {
         if (k === 'x') { cutSel(); return; }
         if (k === 'v') { e.preventDefault(); paste(); return; }
         if (k === 'd') { e.preventDefault(); duplicate(); return; }
+        if (k === 'f') { e.preventDefault(); S.ui.modal = { kind: 'find' }; emit(); return; }
         if (k === 'g') { e.preventDefault(); if (e.shiftKey) ungroupSel(); else groupSel(); return; }
         if (k === 's') { e.preventDefault(); saveProject(); return; }
         if (k === 'o') { e.preventDefault(); openProject(); return; }
@@ -503,6 +536,11 @@ export default function App() {
       {m?.kind === 'preflight' && <Preflight />}
       {m?.kind === 'export-video' && <VideoProgress />}
       {m?.kind === 'shortcuts' && <Shortcuts />}
+      {m?.kind === 'find' && <FindModal />}
+      {m?.kind === 'story' && <StoryModal />}
+      {m?.kind === 'docinfo' && <DocInfoModal />}
+      {m?.kind === 'pdf' && <PdfModal />}
+      {m?.kind === 'toc' && <TocModal />}
       {m?.kind === 'trace' && <TraceModal />}
       {m?.kind === 'tiles' && <TilesModal />}
       {S.ui.toast && <div className="toast" role="status">{S.ui.toast}</div>}
