@@ -4,13 +4,14 @@ import type { Obj, Page, ParaStyle } from '../model';
 import { PAGE_PRESETS, uid, FONTS } from '../model';
 import { renderPage } from '../render';
 import { Icon } from './icons';
-import { IconBtn, Num, Select, Section, ColourInput, Text } from './controls';
+import { IconBtn, Num, Select, Section, ColourInput, Text, Menu } from './controls';
 import {
   addLayer, deleteLayer, moveLayer, addPage, duplicatePage, deletePage, movePage, goPage, placePage, newRasterLayer, flattenPage,
   rasterise, addMediaClip, addSceneClip, addTitleClip, paintTarget, editTime,
 } from '../ops';
 import { FILTERS, selectAllPixels, selectNone, invertSelection, fillSelection, cropRasterToSelection, selectionBounds, cropPageTo, hasSelection } from '../grain';
 import { importFiles, pickFiles } from '../io';
+import { addGenerator, placeMedia } from '../motion';
 import { rasterCanvas } from '../raster';
 import { imageFor } from '../raster';
 
@@ -276,12 +277,18 @@ export function MediaPanel() {
         {!S.doc.media.length && <p className="muted small">Import video, audio or images, or drop files anywhere on the window.</p>}
         <div className="media-list">
           {S.doc.media.map(m => (
-            <div key={m.id} className="media-item" draggable onDragStart={e => e.dataTransfer.setData('text/media', m.id)} title="Drag onto a track, or use + to add at the playhead">
+            <div key={m.id} className="media-item" draggable onDragStart={e => e.dataTransfer.setData('text/media', m.id)} onDoubleClick={() => { S.ui.modal = { kind: 'source', data: m.id }; emit(); }} title="Double-click to preview and mark in/out. Drag onto a track.">
               <div className="media-thumb">
                 {m.kind === 'image' ? <img src={imageFor(m.url).src} alt="" /> : m.kind === 'video' ? <video src={m.url} muted preload="metadata" /> : <Icon name="wave" size={22} />}
               </div>
               <div className="media-meta"><span className="name">{m.name}</span><span className="muted small">{m.kind} · {m.duration.toFixed(1)}s{m.w ? ` · ${m.w}×${m.h}` : ''}</span></div>
-              <IconBtn icon="plus" title="Add at playhead" onClick={() => addMediaClip(m)} />
+              <IconBtn icon="eye" title="Open in the source player" onClick={() => { S.ui.modal = { kind: 'source', data: m.id }; emit(); }} />
+              <Menu icon="plus" items={[
+                { label: 'Add at playhead', onClick: () => addMediaClip(m) },
+                { label: 'Append to the end', onClick: () => placeMedia(m, 'append') },
+                { label: 'Insert at playhead (ripple)', onClick: () => placeMedia(m, 'insert') },
+                { label: 'Overwrite at playhead', onClick: () => placeMedia(m, 'overwrite') },
+              ]} align="right" />
               <IconBtn icon="trash" title="Remove from project" onClick={() => {
                 S.doc.media = S.doc.media.filter(x => x !== m);
                 S.doc.timeline.tracks.forEach(t => (t.clips = t.clips.filter(c => c.mediaId !== m.id)));
@@ -304,7 +311,12 @@ export function MediaPanel() {
         </div>
       </Section>
       <Section title="Generators">
-        <button className="btn small" onClick={() => addTitleClip()}><Icon name="type" size={13} /> Title</button>
+        <div className="btn-wrap">
+          <button className="btn small" onClick={() => addTitleClip()}><Icon name="type" size={13} /> Title</button>
+          <button className="btn small" onClick={() => addGenerator('color')}>Colour</button>
+          <button className="btn small" onClick={() => addGenerator('bars')}>Colour bars</button>
+          <button className="btn small" onClick={() => addGenerator('countdown')}>Countdown</button>
+        </div>
       </Section>
     </div>
   );

@@ -3,12 +3,13 @@ import { BLEND_MODES, FONTS, PAGE_PRESETS, blendLabel } from '../model';
 import type { AnimProp, Obj } from '../model';
 import { anim, localBox, setProp, valueAt } from '../geometry';
 import {
-  align, booleanOp, breakApart, combine, editTime, findClip, flip, objectToPath, rasterise, reversePaths, simplifyPaths, zorder, activeSceneClip, threadHead,
+  align, booleanOp, breakApart, combine, editTime, findClip, flip, objectToPath, rasterise, reversePaths, simplifyPaths, zorder, threadHead,
 } from '../ops';
 import { Num, Slider, Select, Section, Row, Text, ColourInput, PaintField, IconBtn } from './controls';
 import { Icon } from './icons';
 import { layoutAll } from '../text';
 import { rasterCanvas } from '../raster';
+import { ClipInspector, TrackInspector, SequenceInspector } from './MotionProps';
 import { EffectsSection, MarkerSection, GroupSection, TransformSection, PathExtras, NodeSection, TextPathSection, TextExtras, TableProps, ImageProps, LayoutSection } from './InkProps';
 
 const live = () => emit();
@@ -283,101 +284,10 @@ function RasterProps({ o }: { o: Obj }) {
   );
 }
 
-function ClipProps() {
-  const f = findClip(S.ui.selClip)!;
-  const c = f.clip;
-  const set = (fn: () => void) => { fn(); live(); };
-  const md = c.mediaId ? S.doc.media.find(m => m.id === c.mediaId) : null;
-  return (
-    <>
-      <div className="obj-head">
-        <span className="type-badge">{c.kind === 'scene' ? 'scene clip' : c.kind === 'title' ? 'title' : md?.kind || 'clip'}</span>
-        <Text value={c.name} onChange={v => set(() => (c.name = v))} onCommit={commit} />
-      </div>
-      <Section title="Timing">
-        <div className="grid2">
-          <Num label="Start" value={c.start} step={0.1} min={0} unit="s" onChange={v => set(() => (c.start = v))} onCommit={commit} />
-          <Num label="Length" value={c.dur} step={0.1} min={0.1} unit="s" onChange={v => set(() => (c.dur = v))} onCommit={commit} />
-          <Num label="In" value={c.offset} step={0.1} min={0} unit="s" onChange={v => set(() => (c.offset = v))} onCommit={commit} />
-          <Num label="Speed" value={c.speed} step={0.05} min={0.1} max={8} unit="×" onChange={v => set(() => (c.speed = v))} onCommit={commit} />
-          <Num label="Fade in" value={c.fadeIn} step={0.1} min={0} unit="s" onChange={v => set(() => (c.fadeIn = v))} onCommit={commit} />
-          <Num label="Fade out" value={c.fadeOut} step={0.1} min={0} unit="s" onChange={v => set(() => (c.fadeOut = v))} onCommit={commit} />
-        </div>
-      </Section>
-      {f.track.kind === 'video' && (
-        <Section title="Picture">
-          <Slider label="Opacity" value={Math.round(c.opacity * 100)} min={0} max={100} fmt={v => `${v}%`} onChange={v => set(() => (c.opacity = v / 100))} onCommit={commit} />
-          {c.kind !== 'title' && (
-            <div className="grid2">
-              <Num label="X" value={c.x} onChange={v => set(() => (c.x = v))} onCommit={commit} />
-              <Num label="Y" value={c.y} onChange={v => set(() => (c.y = v))} onCommit={commit} />
-              <Num label="Scale" value={Math.round(c.scale * 100)} min={1} unit="%" onChange={v => set(() => (c.scale = v / 100))} onCommit={commit} />
-            </div>
-          )}
-        </Section>
-      )}
-      {c.kind === 'title' && (
-        <Section title="Title">
-          <textarea className="text-area" rows={2} value={c.text || ''} onChange={e => set(() => (c.text = e.target.value))} onBlur={commit} onKeyDown={e => e.stopPropagation()} />
-          <Row><Select value={c.font || 'Fraunces'} options={FONTS.map(x => ({ value: x, label: x }))} onChange={v => { c.font = v; commit(); }} /></Row>
-          <div className="grid2">
-            <Num label="Size" value={c.fontSize || 48} min={6} onChange={v => set(() => (c.fontSize = v))} onCommit={commit} />
-            <ColourInput value={c.color || '#FFFFFF'} onChange={v => set(() => (c.color = v))} onCommit={commit} />
-            <Num label="X" value={c.x} onChange={v => set(() => (c.x = v))} onCommit={commit} />
-            <Num label="Y" value={c.y} onChange={v => set(() => (c.y = v))} onCommit={commit} />
-          </div>
-        </Section>
-      )}
-      {(f.track.kind === 'audio' || md?.kind === 'video') && (
-        <Section title="Audio">
-          <Slider label="Volume" value={Math.round(c.volume * 100)} min={0} max={200} fmt={v => `${v}%`} onChange={v => set(() => (c.volume = v / 100))} onCommit={commit} />
-        </Section>
-      )}
-      {f.track.kind === 'video' && (
-        <Section title="Filters">
-          <Slider label="Brightness" value={c.fx.brightness} min={0} max={200} fmt={v => `${v}%`} onChange={v => set(() => (c.fx.brightness = v))} onCommit={commit} />
-          <Slider label="Contrast" value={c.fx.contrast} min={0} max={200} fmt={v => `${v}%`} onChange={v => set(() => (c.fx.contrast = v))} onCommit={commit} />
-          <Slider label="Saturation" value={c.fx.saturate} min={0} max={300} fmt={v => `${v}%`} onChange={v => set(() => (c.fx.saturate = v))} onCommit={commit} />
-          <Slider label="Hue" value={c.fx.hue} min={-180} max={180} fmt={v => `${v}°`} onChange={v => set(() => (c.fx.hue = v))} onCommit={commit} />
-          <Slider label="Blur" value={c.fx.blur} min={0} max={30} step={0.5} fmt={v => `${v}px`} onChange={v => set(() => (c.fx.blur = v))} onCommit={commit} />
-          <Slider label="Greyscale" value={c.fx.grayscale} min={0} max={100} fmt={v => `${v}%`} onChange={v => set(() => (c.fx.grayscale = v))} onCommit={commit} />
-          <Slider label="Sepia" value={c.fx.sepia} min={0} max={100} fmt={v => `${v}%`} onChange={v => set(() => (c.fx.sepia = v))} onCommit={commit} />
-          <button className="btn small" onClick={() => { c.fx = { brightness: 100, contrast: 100, saturate: 100, hue: 0, blur: 0, grayscale: 0, sepia: 0 }; commit(); }}>Reset filters</button>
-        </Section>
-      )}
-    </>
-  );
-}
-
 function PageProps() {
   const pg = page();
   const mode = S.ui.mode;
   const set = (fn: () => void) => { fn(); live(); };
-  if (mode === 'motion') {
-    const tl = S.doc.timeline;
-    return (
-      <>
-        <Section title="Sequence">
-          <div className="grid2">
-            <Num label="W" value={tl.w} min={16} unit="px" onChange={v => set(() => (tl.w = Math.round(v)))} onCommit={() => { S.ui.views.motion.fitted = false; commit(); }} />
-            <Num label="H" value={tl.h} min={16} unit="px" onChange={v => set(() => (tl.h = Math.round(v)))} onCommit={() => { S.ui.views.motion.fitted = false; commit(); }} />
-            <Select value={String(tl.fps)} options={['24', '25', '30', '50', '60'].map(v => ({ value: v, label: `${v} fps` }))} onChange={v => { tl.fps = +v; commit(); }} />
-            <label className="check"><input type="checkbox" checked={tl.loop} onChange={e => { tl.loop = e.target.checked; commit(); }} /> Loop playback</label>
-          </div>
-          <div className="btn-wrap">
-            {[[1280, 720, '720p'], [1920, 1080, '1080p'], [1080, 1080, 'Square'], [1080, 1920, 'Vertical']].map(([w, h, l]) => (
-              <button key={l} className="btn small" onClick={() => { tl.w = +w; tl.h = +h; S.ui.views.motion.fitted = false; commit(); }}>{l}</button>
-            ))}
-          </div>
-        </Section>
-        <div className="empty-hint">
-          <Icon name="film" size={28} />
-          <p>Select a clip in the timeline to edit its timing, filters and fades, or click an object in the preview to animate it.</p>
-          {!activeSceneClip() && <p className="muted small">The current page ({pg.name}) isn't under the playhead in any scene clip.</p>}
-        </div>
-      </>
-    );
-  }
   return (
     <>
       <Section title={pg.isMaster ? 'Master page' : 'Page'}>
@@ -435,7 +345,11 @@ function PageProps() {
 export default function Props() {
   useStore(); useTime();
   void T;
-  if (S.ui.mode === 'motion' && S.ui.selClip && findClip(S.ui.selClip) && !S.ui.sel.length) return <div className="panel-scroll"><ClipProps /></div>;
   const objs = selected();
+  if (S.ui.mode === 'motion' && !objs.length) {
+    const f = S.ui.selClip ? findClip(S.ui.selClip) : null;
+    const tr = S.ui.selTrack ? S.doc.timeline.tracks.find(t => t.id === S.ui.selTrack) : null;
+    return <div className="panel-scroll">{f ? <ClipInspector c={f.clip} track={f.track} /> : tr ? <TrackInspector tr={tr} /> : <SequenceInspector />}</div>;
+  }
   return <div className="panel-scroll">{objs.length ? <ObjectProps objs={objs} /> : <PageProps />}</div>;
 }

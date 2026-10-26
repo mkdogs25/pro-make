@@ -12,11 +12,13 @@ import Timeline from './ui/Timeline';
 import { ColourPanel } from './ui/ColourPanel';
 import { SymbolsPanel } from './ui/SymbolsPanel';
 import { TraceModal, TilesModal } from './ui/InkModals';
+import { ExportOptsModal, SourceModal, ScopesPanel } from './ui/MotionModals';
 import { FindModal, StoryModal, DocInfoModal, PdfModal, TocModal } from './ui/PrintModals';
 import { copySel, cutSel, paste, duplicate, deleteSelection, deleteClip, splitClip, editTime, booleanOp, zorder } from './ops';
-import { saveProject, openProject, importFiles, pickFiles, exportPNG, exportJPEG, exportSVG, exportPDF, exportSelectionPNG, exportSelectionSVG, exportVideo, exportState, newDocument, restoreAutosave, startAutosave } from './io';
+import { saveProject, openProject, importFiles, pickFiles, exportPNG, exportJPEG, exportSVG, exportPDF, exportSelectionPNG, exportSelectionSVG, exportState, newDocument, restoreAutosave, startAutosave } from './io';
 import { togglePlay, seek, pause } from './playback';
 import { groupSel, ungroupSel } from './ink';
+import { addMarker, copyClip, duplicateClip, fitTimeline, pasteClip, setInPoint, setOutPoint } from './motion';
 import { FILTERS, Adjust, selectAllPixels, selectNone, invertSelection, fillSelection, hasSelection } from './grain';
 import { setProp, anim } from './geometry';
 import { imageFor } from './raster';
@@ -92,7 +94,7 @@ function TopBar() {
           { label: 'Selection as PNG', icon: 'image', onClick: () => exportSelectionPNG(), disabled: mode === 'motion' },
           { label: 'Selection as SVG', icon: 'pen', onClick: exportSelectionSVG, disabled: mode === 'motion' },
           'sep',
-          { label: 'Render video (Motion timeline)', icon: 'film', onClick: () => { setMode('motion'); exportVideo(); } },
+          { label: 'Video, GIF, frames or audio… (Motion)', icon: 'film', onClick: () => { setMode('motion'); S.ui.modal = { kind: 'export-opts' }; emit(); } },
           'sep',
           { label: 'Preflight check…', icon: 'warn', onClick: () => { S.ui.modal = { kind: 'preflight' }; emit(); } },
         ]} />
@@ -226,7 +228,7 @@ function StatusBar() {
 
 // ---------------- sidebar ----------------
 const TABS: Record<Mode, { id: string; label: string; icon: string }[]> = {
-  motion: [{ id: 'props', label: 'Inspector', icon: 'sliders' }, { id: 'media', label: 'Media', icon: 'film' }, { id: 'layers', label: 'Layers', icon: 'layers' }],
+  motion: [{ id: 'props', label: 'Inspector', icon: 'sliders' }, { id: 'media', label: 'Media', icon: 'film' }, { id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'scopes', label: 'Scopes', icon: 'wave' }],
   ink: [{ id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'symbols', label: 'Symbols', icon: 'symbols' }],
   print: [{ id: 'pages', label: 'Pages', icon: 'pages' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'styles', label: 'Styles', icon: 'type' }, { id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'symbols', label: 'Symbols', icon: 'symbols' }],
   grain: [{ id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'adjust', label: 'Adjust', icon: 'sparkle' }],
@@ -274,6 +276,7 @@ function Sidebar() {
         {tab === 'adjust' && <AdjustPanel />}
         {tab === 'media' && <MediaPanel />}
         {tab === 'colour' && <ColourPanel />}
+        {tab === 'scopes' && <ScopesPanel />}
         {tab === 'symbols' && <SymbolsPanel />}
       </div>
       {S.ui.mode !== 'motion' && <Swatches />}
@@ -400,6 +403,9 @@ const SHORTCUTS: [string, string][] = [
   ['X', 'Swap colours'],
   ['S', 'Split clip at playhead (Motion)'],
   ['K', 'Add keyframe for the selected object (Motion)'],
+  ['M / I / O', 'Marker, in point, out point at the playhead (Motion)'],
+  ['Ctrl+G / Ctrl+Shift+G', 'Group / ungroup (Ink, Print)'],
+  ['Ctrl+F', 'Find and replace'],
   ['Home / End', 'Jump to start or end of timeline'],
   ['Enter / Esc', 'Finish pen path / deselect'],
   ['Ctrl+S / Ctrl+O / Ctrl+E', 'Save, open, export PNG'],
@@ -429,10 +435,11 @@ function useShortcuts() {
       if (mod) {
         if (k === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
         if (k === 'y') { e.preventDefault(); redo(); return; }
-        if (k === 'c') { copySel(); return; }
+        const clipMode = mode === 'motion' && !!S.ui.selClip && !S.ui.sel.length;
+        if (k === 'c') { if (clipMode && copyClip()) return; copySel(); return; }
         if (k === 'x') { cutSel(); return; }
-        if (k === 'v') { e.preventDefault(); paste(); return; }
-        if (k === 'd') { e.preventDefault(); duplicate(); return; }
+        if (k === 'v') { e.preventDefault(); if (clipMode) pasteClip(); else paste(); return; }
+        if (k === 'd') { e.preventDefault(); if (clipMode) duplicateClip(); else duplicate(); return; }
         if (k === 'f') { e.preventDefault(); S.ui.modal = { kind: 'find' }; emit(); return; }
         if (k === 'g') { e.preventDefault(); if (e.shiftKey) ungroupSel(); else groupSel(); return; }
         if (k === 's') { e.preventDefault(); saveProject(); return; }
@@ -483,6 +490,10 @@ function useShortcuts() {
       if (k === 'x' && !e.shiftKey && mode !== 'grain') { [S.ui.fg, S.ui.bg] = [S.ui.bg, S.ui.fg]; emit(); return; }
       if (k === 'x' && e.shiftKey) { [S.ui.fg, S.ui.bg] = [S.ui.bg, S.ui.fg]; emit(); return; }
       if (mode === 'motion' && k === 's') { splitClip(); return; }
+      if (mode === 'motion' && k === 'm') { addMarker(); return; }
+      if (mode === 'motion' && k === 'i') { setInPoint(); return; }
+      if (mode === 'motion' && k === 'o') { setOutPoint(); return; }
+      if (mode === 'motion' && e.key === '\\') { fitTimeline(window.innerWidth - 160); emit(); return; }
       if (mode === 'motion' && k === 'k') {
         const t = editTime();
         for (const o of selected()) { const a = anim(o, t); (['x', 'y', 'rotation', 'sx', 'sy', 'opacity'] as const).forEach(p => setProp(o, p, a[p], t, true)); }
@@ -536,6 +547,8 @@ export default function App() {
       {m?.kind === 'preflight' && <Preflight />}
       {m?.kind === 'export-video' && <VideoProgress />}
       {m?.kind === 'shortcuts' && <Shortcuts />}
+      {m?.kind === 'export-opts' && <ExportOptsModal />}
+      {m?.kind === 'source' && <SourceModal id={m.data as string} />}
       {m?.kind === 'find' && <FindModal />}
       {m?.kind === 'story' && <StoryModal />}
       {m?.kind === 'docinfo' && <DocInfoModal />}

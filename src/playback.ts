@@ -1,7 +1,9 @@
 import { S, T, emitTime, setTime } from './store';
-import { clipActive, clipAlpha, timelineDuration } from './render';
+import { clipActive, clipLocalTime, timelineDuration } from './render';
+import { exportStream, resumeAudio, setLevels } from './audio';
+import { valueAt } from './geometry';
 import { allMediaEls, mediaEl } from './media';
-import type { Clip, Doc } from './model';
+import type { Doc } from './model';
 
 let raf = 0;
 let wallStart = 0, timeStart = 0;
@@ -16,6 +18,7 @@ export function play(opts?: { from?: number; until?: number; frame?: (t: number)
   onEnd = opts?.end || null;
   const dur = timelineDuration(S.doc);
   if (T.time >= dur - 0.01) T.time = 0;
+  resumeAudio();
   T.playing = true;
   wallStart = performance.now(); timeStart = T.time;
   emitTime();
@@ -58,6 +61,8 @@ function pauseMedia() { for (const [, e] of allMediaEls()) if (!e.paused) e.paus
 
 export function syncMedia(doc: Doc, t: number, playing: boolean) {
   const used = new Set<string>();
+  const solo = doc.timeline.tracks.some(tr => tr.solo);
+  const masterVol = doc.timeline.master ?? 1;
   for (const tr of doc.timeline.tracks) {
     for (const c of tr.clips) {
       if (c.kind !== 'media' || !clipActive(c, t)) continue;
@@ -65,13 +70,22 @@ export function syncMedia(doc: Doc, t: number, playing: boolean) {
       if (!m || m.kind === 'image') continue;
       const e = mediaEl(m);
       used.add(m.id);
-      const want = c.offset + (t - c.start) * c.speed;
-      e.muted = tr.muted || (tr.kind === 'video' && tr.hidden);
-      e.volume = Math.max(0, Math.min(1, c.volume * (tr.kind === 'audio' ? fadeGain(c, t) : clipAlpha(c, t) / (c.opacity || 1))));
+      const want = clipLocalTime(c, t);
+      const silent = tr.muted || (solo && !tr.solo) || c.freeze;
+      e.muted = !!silent;
+      const lt = t - c.start;
+      let fade = 1;
+      if (c.fadeIn > 0 && lt < c.fadeIn) fade *= lt / c.fadeIn;
+      if (c.fadeOut > 0 && lt > c.dur - c.fadeOut) fade *= Math.max(0, (c.dur - lt) / c.fadeOut);
+      const clipVol = valueAt(c.keys?.volume, c.volume, lt);
+      setLevels(e, clipVol * fade * (tr.volume ?? 1), Math.max(-1, Math.min(1, (c.pan ?? 0) + (tr.pan ?? 0))), masterVol);
       if (playing) {
-        e.playbackRate = c.speed;
-        if (Math.abs(e.currentTime - want) > 0.25) e.currentTime = want;
-        if (e.paused) e.play().catch(() => {});
+        e.playbackRate = Math.max(0.0625, Math.min(16, c.speed));
+        if (c.freeze) { if (!e.paused) e.pause(); if (Math.abs(e.currentTime - want) > 0.05) e.currentTime = want; }
+        else {
+          if (Math.abs(e.currentTime - want) > 0.25) e.currentTime = want;
+          if (e.paused) e.play().catch(() => {});
+        }
       } else {
         if (!e.paused) e.pause();
         if (Math.abs(e.currentTime - want) > 0.02) e.currentTime = want;
@@ -81,31 +95,4 @@ export function syncMedia(doc: Doc, t: number, playing: boolean) {
   for (const [id, e] of allMediaEls()) if (!used.has(id) && !e.paused) e.pause();
 }
 
-function fadeGain(c: Clip, t: number) {
-  const lt = t - c.start;
-  let g = 1;
-  if (c.fadeIn > 0 && lt < c.fadeIn) g *= lt / c.fadeIn;
-  if (c.fadeOut > 0 && lt > c.dur - c.fadeOut) g *= Math.max(0, (c.dur - lt) / c.fadeOut);
-  return g;
-}
-
-// Route media audio through Web Audio so it can be recorded on export.
-let actx: AudioContext | null = null;
-let dest: MediaStreamAudioDestinationNode | null = null;
-const routed = new WeakSet<HTMLMediaElement>();
-export function audioStream(): MediaStream | null {
-  try {
-    actx = actx || new AudioContext();
-    dest = dest || actx.createMediaStreamDestination();
-    for (const m of S.doc.media) {
-      if (m.kind === 'image') continue;
-      const e = mediaEl(m);
-      if (routed.has(e)) continue;
-      const src = actx.createMediaElementSource(e);
-      src.connect(dest); src.connect(actx.destination);
-      routed.add(e);
-    }
-    actx.resume();
-    return dest.stream;
-  } catch { return null; }
-}
+export const audioStream = () => exportStream();

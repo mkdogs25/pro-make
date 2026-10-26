@@ -38,6 +38,8 @@ export interface UI {
   calli: { width: number; angle: number; thinning: number };
   tableDef: { rows: number; cols: number };
   recent: string[];
+  selTrack: string | null;
+  ripple: boolean;
 }
 
 const initialDoc = sampleDoc();
@@ -81,6 +83,8 @@ export const S: { doc: Doc; ui: UI } = {
     calli: { width: 16, angle: 45, thinning: 40 },
     tableDef: { rows: 4, cols: 3 },
     recent: [],
+    selTrack: null,
+    ripple: false,
   },
 };
 

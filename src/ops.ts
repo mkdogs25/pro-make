@@ -480,10 +480,10 @@ export function findClip(id: string | null): { clip: Clip; track: Track } | null
   for (const track of S.doc.timeline.tracks) { const clip = track.clips.find(c => c.id === id); if (clip) return { clip, track }; }
   return null;
 }
-function baseClip(kind: Clip['kind'], name: string, start: number, dur: number): Clip {
+export function baseClip(kind: Clip['kind'], name: string, start: number, dur: number): Clip {
   return { id: uid('c'), kind, name, start, dur, offset: 0, speed: 1, volume: 1, opacity: 1, fadeIn: 0, fadeOut: 0, x: 0, y: 0, scale: 1, fx: defaultFx() };
 }
-function freeTrack(kind: 'video' | 'audio', start: number, dur: number): Track {
+export function freeTrack(kind: 'video' | 'audio', start: number, dur: number): Track {
   const tl = S.doc.timeline;
   const tracks = tl.tracks.filter(t => t.kind === kind && !t.locked);
   const ordered = kind === 'video' ? [...tracks].reverse() : tracks;

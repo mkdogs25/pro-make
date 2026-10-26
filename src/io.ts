@@ -1,16 +1,18 @@
 import P from 'paper';
 import { jsPDF } from 'jspdf';
 import { svg2pdf } from 'svg2pdf.js';
-import { S, T, commit, emit, page, replaceDoc, toast, afterCommit } from './store';
+import { S, T, commit, emit, emitTime, page, replaceDoc, toast, afterCommit } from './store';
 import type { Doc, Obj, Page, Paint } from './model';
 import { newObj, isPattern } from './model';
 import { anim, localBox, mapNodes, markerPaths, objMatrix, objSubpaths, pageBox, subpathsToD, unionBox } from './geometry';
 import { renderFrame, renderPage, tableGeometry, timelineDuration } from './render';
 import { imageFor, makeCanvas, maskCanvas, rasterCanvas, storeRaster } from './raster';
-import { mediaBlobs, probeMedia } from './media';
+import { allMediaEls, mediaBlobs, probeMedia } from './media';
 import { addMediaClip, currentLayerId, editTime, fromPaper, addObj } from './ops';
 import { layoutAll, fontString } from './text';
-import { play, pause, audioStream } from './playback';
+import { play, pause, audioStream, syncMedia } from './playback';
+import { GifEncoder } from './gif';
+import { zipFiles } from './zip';
 import { sampleDoc } from './sample';
 
 export function download(blob: Blob, name: string) {
@@ -533,47 +535,113 @@ export function exportSelectionSVG() {
   download(new Blob([pageToSVG(pg2, s.t, s.box)], { type: 'image/svg+xml' }), `${safe(S.doc.name)}-selection.svg`);
 }
 
-// ---------- video export ----------
+// ---------- video / animation export ----------
+export interface VideoOpts { format: 'video' | 'gif' | 'png' | 'audio'; scale: number; fps: number; mbps: number; range: 'all' | 'inout'; gifWidth: number }
+export const defaultVideoOpts: VideoOpts = { format: 'video', scale: 1, fps: 30, mbps: 8, range: 'all', gifWidth: 480 };
 export const exportState = { running: false, progress: 0, cancel: () => {} };
 
-export function exportVideo() {
+/** Seek every active media element to time t and wait until the frames are ready. */
+async function settle(t: number) {
+  syncMedia(S.doc, t, false);
+  const waits: Promise<void>[] = [];
+  for (const [, e] of allMediaEls()) {
+    if (e.seeking) waits.push(new Promise(res => { const done = () => { e.removeEventListener('seeked', done); res(); }; e.addEventListener('seeked', done); setTimeout(done, 600); }));
+  }
+  if (waits.length) await Promise.all(waits);
+}
+
+export async function exportVideo(arg: Partial<VideoOpts> = {}) {
   if (exportState.running) return;
   const tl = S.doc.timeline;
-  const dur = timelineDuration(S.doc);
-  const c = makeCanvas(tl.w, tl.h);
+  const opts: VideoOpts = { ...defaultVideoOpts, fps: tl.fps, ...arg };
+  const total = timelineDuration(S.doc);
+  const from = opts.range === 'inout' ? tl.inPoint ?? 0 : 0;
+  const to = opts.range === 'inout' ? tl.outPoint ?? total : total;
+  if (to - from < 0.05) { toast('The in/out range is empty'); return; }
+  pause();
+  let cancelled = false;
+  exportState.running = true; exportState.progress = 0;
+  S.ui.modal = { kind: 'export-video' };
+  emit();
+
+  // ---- offline formats: GIF and PNG sequence ----
+  if (opts.format === 'gif' || opts.format === 'png') {
+    const sc = opts.format === 'gif' ? Math.min(1, opts.gifWidth / tl.w) : opts.scale;
+    const W = Math.max(2, Math.round(tl.w * sc)), H = Math.max(2, Math.round(tl.h * sc));
+    const fps = opts.format === 'gif' ? Math.min(opts.fps, 25) : opts.fps;
+    const frames = Math.max(1, Math.round((to - from) * fps));
+    const c = makeCanvas(W, H);
+    const ctx = c.getContext('2d', { willReadFrequently: true })!;
+    const gif = opts.format === 'gif' ? new GifEncoder(W, H) : null;
+    const files: { name: string; data: Uint8Array }[] = [];
+    exportState.cancel = () => { cancelled = true; };
+    for (let i = 0; i < frames && !cancelled; i++) {
+      const t = from + i / fps;
+      await settle(t);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.save(); ctx.scale(sc, sc); renderFrame(ctx, S.doc, t); ctx.restore();
+      if (gif) gif.addFrame(ctx.getImageData(0, 0, W, H).data, Math.max(2, Math.round(100 / fps)));
+      else {
+        const blob = await new Promise<Blob | null>(r => c.toBlob(r, 'image/png'));
+        if (blob) files.push({ name: `frame-${String(i + 1).padStart(5, '0')}.png`, data: new Uint8Array(await blob.arrayBuffer()) });
+      }
+      exportState.progress = (i + 1) / frames;
+      emitTime();
+      await new Promise(r => setTimeout(r, 0));
+    }
+    exportState.running = false; S.ui.modal = null; emit();
+    if (cancelled) { toast('Export cancelled'); return; }
+    if (gif) download(gif.finish(), `${safe(S.doc.name)}.gif`);
+    else download(zipFiles(files), `${safe(S.doc.name)}-frames.zip`);
+    toast(gif ? 'GIF exported' : `${files.length} frames exported`);
+    return;
+  }
+
+  // ---- real-time formats: video and audio-only ----
+  const sc = opts.scale;
+  const W = Math.max(2, Math.round((tl.w * sc) / 2) * 2), H = Math.max(2, Math.round((tl.h * sc) / 2) * 2);
+  const c = makeCanvas(W, H);
   const ctx = c.getContext('2d')!;
-  const stream = c.captureStream(0);
-  const vtrack = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void };
-  const draw = (t: number) => { renderFrame(ctx, S.doc, t); vtrack.requestFrame?.(); };
-  const hasAudio = tl.tracks.some(tr => !tr.muted && tr.clips.some(c => c.kind === 'media' && S.doc.media.find(m => m.id === c.mediaId)?.kind !== 'image'));
-  if (hasAudio) audioStream()?.getAudioTracks().forEach(t => stream.addTrack(t));
-  const types = hasAudio
-    ? ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm']
-    : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/mp4;codecs=avc1', 'video/mp4', 'video/webm'];
+  const hasAudio = tl.tracks.some(tr => !tr.muted && tr.clips.some(cl => cl.kind === 'media' && S.doc.media.find(m => m.id === cl.mediaId)?.kind !== 'image'));
+  const aud = hasAudio || opts.format === 'audio' ? audioStream() : null;
+  let stream: MediaStream, vtrack: (MediaStreamTrack & { requestFrame?: () => void }) | null = null;
+  if (opts.format === 'audio') {
+    if (!aud) { exportState.running = false; S.ui.modal = null; emit(); toast('There is no audio to export'); return; }
+    stream = new MediaStream(aud.getAudioTracks());
+  } else {
+    stream = c.captureStream(0);
+    vtrack = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void };
+    aud?.getAudioTracks().forEach(t => stream.addTrack(t));
+  }
+  const types = opts.format === 'audio' ? ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm']
+    : hasAudio ? ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm']
+      : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/mp4;codecs=avc1', 'video/mp4', 'video/webm'];
   const mime = types.find(t => MediaRecorder.isTypeSupported(t)) || '';
   let rec: MediaRecorder;
-  try { rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8_000_000 }); }
-  catch { toast('Video recording is not supported in this browser'); return; }
+  try { rec = new MediaRecorder(stream, { mimeType: mime, ...(opts.format === 'video' ? { videoBitsPerSecond: opts.mbps * 1e6 } : {}) }); }
+  catch { exportState.running = false; S.ui.modal = null; emit(); toast('Recording is not supported in this browser'); return; }
   const chunks: Blob[] = [];
   rec.ondataavailable = e => e.data.size && chunks.push(e.data);
-  let cancelled = false;
+  const draw = (t: number) => {
+    if (opts.format === 'audio') return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.save(); ctx.scale(sc, sc); renderFrame(ctx, S.doc, t); ctx.restore();
+    vtrack?.requestFrame?.();
+  };
   rec.onstop = () => {
     exportState.running = false; emit();
     if (cancelled) { toast('Export cancelled'); return; }
-    const ext = mime.includes('mp4') ? 'mp4' : 'webm';
+    const ext = opts.format === 'audio' ? (mime.includes('ogg') ? 'ogg' : 'webm') : mime.includes('mp4') ? 'mp4' : 'webm';
     download(new Blob(chunks, { type: mime || 'video/webm' }), `${safe(S.doc.name)}.${ext}`);
-    toast('Video exported');
+    toast(opts.format === 'audio' ? 'Audio exported' : 'Video exported');
   };
-  exportState.running = true; exportState.progress = 0;
   exportState.cancel = () => { cancelled = true; pause(); if (rec.state !== 'inactive') rec.stop(); };
-  S.ui.modal = { kind: 'export-video' };
-  emit();
   rec.start(250);
-  draw(0);
+  draw(from);
   play({
-    from: 0, until: dur,
-    frame: t => { draw(t); exportState.progress = t / dur; },
-    end: () => { draw(dur - 0.001); setTimeout(() => rec.state !== 'inactive' && rec.stop(), 150); S.ui.modal = null; emit(); },
+    from, until: to,
+    frame: t => { draw(t); exportState.progress = (t - from) / (to - from); },
+    end: () => { draw(to - 0.001); setTimeout(() => rec.state !== 'inactive' && rec.stop(), 150); S.ui.modal = null; emit(); },
   });
 }
 
