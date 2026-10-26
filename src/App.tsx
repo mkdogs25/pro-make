@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { S, T, commit, emit, page, redo, undo, canUndo, canRedo, setMode, setTool, tool, toast, useStore, useTime, selected } from './store';
+import { S, T, commit, emit, fmtUnit, page, redo, undo, canUndo, canRedo, setMode, setTool, tool, toast, useStore, useTime, selected } from './store';
 import type { Mode } from './model';
 import { FONTS } from './model';
 import { MODES, TOOLS } from './tools';
@@ -229,7 +229,8 @@ function StatusBar() {
         <IconBtn icon="plus" title="Zoom in (+)" size={13} onClick={() => stageApi.zoomBy(1.25)} />
       </span>
       <span id="cursor-readout" className="muted">–</span>
-      <span>{pg.name} · {pg.w} × {pg.h} px</span>
+      <span>{pg.name} · {pg.w} × {pg.h} px{S.ui.unit !== 'px' ? ` (${fmtUnit(pg.w)} × ${fmtUnit(pg.h)})` : ''}</span>
+      {S.ui.mode !== 'motion' && <select className="select unit-select" value={S.ui.unit} aria-label="Ruler units" title="Ruler units" onChange={e => { S.ui.unit = e.target.value as typeof S.ui.unit; emit(); }}>{(['px', 'mm', 'in', 'pt'] as const).map(u => <option key={u} value={u}>{u}</option>)}</select>}
       {sel.length > 0 && <span>{sel.length} selected{sel.length === 1 ? `: ${sel[0].name}` : ''}</span>}
       {overflow > 0 && <button className="status-warn" onClick={() => { S.ui.modal = { kind: 'preflight' }; emit(); }}><Icon name="warn" size={12} /> {overflow} overflowing frame{overflow > 1 ? 's' : ''}</button>}
       <span className="grow" />
@@ -429,6 +430,10 @@ const SHORTCUTS: [string, string][] = [
   ['M / I / O', 'Marker, in point, out point at the playhead (Motion)'],
   ['Ctrl+G / Ctrl+Shift+G', 'Group / ungroup (Ink, Print)'],
   ['Ctrl+F', 'Find and replace'],
+  ['Q', 'Quick mask on/off (Grain)'],
+  ['Alt+click', 'Set the clone / heal source point (Grain)'],
+  ['Ctrl+click', 'Select an object inside a group (Ink, Print)'],
+  ['Esc', 'Close a dialog or deselect'],
   ['Home / End', 'Jump to start or end of timeline'],
   ['Enter / Esc', 'Finish pen path / deselect'],
   ['Ctrl+S / Ctrl+O / Ctrl+E', 'Save, open, export PNG'],
@@ -449,6 +454,7 @@ function Shortcuts() {
 function useShortcuts() {
   useEffect(() => {
     const kd = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && S.ui.modal && S.ui.modal.kind !== 'export-video') { S.ui.modal = null; emit(); return; }
       if (isTyping(e) || S.ui.modal) return;
       const mod = e.ctrlKey || e.metaKey;
       const k = e.key.toLowerCase();

@@ -4,7 +4,7 @@ import type { Marker, Obj } from '../model';
 import { Num, Select, Section, Row, ColourInput, IconBtn } from './controls';
 import { Icon } from './icons';
 import {
-  addNodes, applyTransform, autoSmooth, groupSel, nodeBreak, nodeJoin, nodeSegmentType, offsetPaths, releaseClip, roughen, setClip, strokeToPath, textToPath, ungroupSel,
+  addNodes, applyTransform, autoSmooth, groupSel, textToOutlines, nodeBreak, nodeJoin, nodeSegmentType, offsetPaths, releaseClip, roughen, setClip, strokeToPath, textToPath, ungroupSel,
 } from '../ink';
 import { loadImageInto, pickFiles } from '../io';
 import { isEditable } from '../store';
@@ -155,6 +155,7 @@ export function TextExtras({ objs }: { objs: Obj[] }) {
   const each = (f: (x: Obj) => void) => { objs.forEach(f); live(); };
   return (
     <>
+      <button className="btn small" onClick={textToOutlines}>Convert text to outlines</button>
       <div className="grid2">
         <Num label="Indent" value={o.indent || 0} min={0} onChange={v => each(x => (x.indent = v))} onCommit={commit} />
         <Num label="Para gap" value={o.paraSpace || 0} min={0} onChange={v => each(x => (x.paraSpace = v))} onCommit={commit} />

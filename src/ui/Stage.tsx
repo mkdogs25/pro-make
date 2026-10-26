@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import P from 'paper';
-import { S, T, commit, emit, page, useStore, useTime, toast, isEditable, layerOf, findObj } from '../store';
+import { S, T, UNIT_PX, fmtUnit, commit, emit, page, useStore, useTime, toast, isEditable, layerOf, findObj } from '../store';
 import { newObj } from '../model';
 import type { Obj, PNode } from '../model';
 import {
@@ -157,6 +157,14 @@ export default function Stage() {
         ctx.strokeStyle = 'rgba(120,90,60,0.16)'; ctx.lineWidth = 1; ctx.beginPath();
         for (let x = 0; x <= pg.w; x += gs) { const a = sp({ x, y: 0 }), b2 = sp({ x, y: pg.h }); ctx.moveTo(Math.round(a.x) + 0.5, a.y); ctx.lineTo(Math.round(b2.x) + 0.5, b2.y); }
         for (let y = 0; y <= pg.h; y += gs) { const a = sp({ x: 0, y }), b2 = sp({ x: pg.w, y }); ctx.moveTo(a.x, Math.round(a.y) + 0.5); ctx.lineTo(b2.x, Math.round(b2.y) + 0.5); }
+        ctx.stroke();
+      }
+    }
+    if (S.ui.baseline.show && mode === 'print') {
+      const bs = S.ui.baseline.size;
+      if (bs * screenScale() >= 4) {
+        ctx.strokeStyle = 'rgba(70,150,200,0.28)'; ctx.lineWidth = 1; ctx.beginPath();
+        for (let y = pg.margins.t; y <= pg.h - pg.margins.b; y += bs) { const a = sp({ x: 0, y }), b2 = sp({ x: pg.w, y }); ctx.moveTo(a.x, Math.round(a.y) + 0.5); ctx.lineTo(b2.x, Math.round(b2.y) + 0.5); }
         ctx.stroke();
       }
     }
@@ -354,27 +362,29 @@ export default function Stage() {
     ctx.fillRect(0, 0, size.w, RULER); ctx.fillRect(0, 0, RULER, size.h);
     ctx.strokeStyle = cssVar('--line') || '#ddd'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(0, RULER + 0.5); ctx.lineTo(size.w, RULER + 0.5); ctx.moveTo(RULER + 0.5, 0); ctx.lineTo(RULER + 0.5, size.h); ctx.stroke();
-    const z = Math.hypot(m.a, m.b);
-    const steps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
-    const step = steps.find(s => s * z >= 60) || 1000;
+    const u = UNIT_PX[S.ui.unit];
+    const z = Math.hypot(m.a, m.b) * u;           // screen pixels per display unit
+    const steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000];
+    const step = steps.find(st => st * z >= 60) || 5000;
     ctx.fillStyle = cssVar('--muted') || '#888'; ctx.font = '9px Inter'; ctx.textBaseline = 'top';
     const inv = m.inverse();
-    const x0 = apply(inv, { x: RULER, y: 0 }).x, x1 = apply(inv, { x: size.w, y: 0 }).x;
+    const x0 = apply(inv, { x: RULER, y: 0 }).x / u, x1 = apply(inv, { x: size.w, y: 0 }).x / u;
+    const lab = (v: number) => String(Math.round(v * 100) / 100);
     ctx.beginPath();
     for (let v = Math.floor(x0 / step) * step; v <= x1; v += step / 5) {
-      const sx = apply(m, { x: v, y: 0 }).x;
+      const sx = apply(m, { x: v * u, y: 0 }).x;
       if (sx < RULER) continue;
       const major = Math.abs(v / step - Math.round(v / step)) < 1e-6;
       ctx.moveTo(Math.round(sx) + 0.5, major ? 4 : 14); ctx.lineTo(Math.round(sx) + 0.5, RULER);
-      if (major) ctx.fillText(String(Math.round(v)), sx + 3, 3);
+      if (major) ctx.fillText(lab(v), sx + 3, 3);
     }
-    const y0 = apply(inv, { x: 0, y: RULER }).y, y1 = apply(inv, { x: 0, y: size.h }).y;
+    const y0 = apply(inv, { x: 0, y: RULER }).y / u, y1 = apply(inv, { x: 0, y: size.h }).y / u;
     for (let v = Math.floor(y0 / step) * step; v <= y1; v += step / 5) {
-      const sy = apply(m, { x: 0, y: v }).y;
+      const sy = apply(m, { x: 0, y: v * u }).y;
       if (sy < RULER) continue;
       const major = Math.abs(v / step - Math.round(v / step)) < 1e-6;
       ctx.moveTo(major ? 4 : 14, Math.round(sy) + 0.5); ctx.lineTo(RULER, Math.round(sy) + 0.5);
-      if (major) { ctx.save(); ctx.translate(3, sy + 3); ctx.rotate(Math.PI / 2); ctx.fillText(String(Math.round(v)), 0, -8); ctx.restore(); }
+      if (major) { ctx.save(); ctx.translate(3, sy + 3); ctx.rotate(Math.PI / 2); ctx.fillText(lab(v), 0, -8); ctx.restore(); }
     }
     ctx.stroke();
     ctx.fillStyle = cssVar('--panel') || '#faf4e6'; ctx.fillRect(0, 0, RULER, RULER);
@@ -436,6 +446,7 @@ export default function Stage() {
     const th = 6 / screenScale();
     const t = editTime();
     const xs = [0, pg.w / 2, pg.w, ...pg.guides.x], ys = [0, pg.h / 2, pg.h, ...pg.guides.y];
+    if (S.ui.baseline.snap && mode === 'print') { const bs = S.ui.baseline.size; for (const dd of [0, box.h]) ys.push(Math.round((box.y + dy + dd - pg.margins.t) / bs) * bs + pg.margins.t); }
     if (S.ui.grid.snap) {
       const gs = S.ui.grid.size;
       const nx = Math.round((box.x + dx) / gs) * gs, ny = Math.round((box.y + dy) / gs) * gs;
@@ -811,7 +822,7 @@ export default function Stage() {
 
   const updateCursorReadout = () => {
     const el = document.getElementById('cursor-readout');
-    if (el && hover.current) el.textContent = `${Math.round(hover.current.x)}, ${Math.round(hover.current.y)} px`;
+    if (el && hover.current) el.textContent = S.ui.unit === 'px' ? `${Math.round(hover.current.x)}, ${Math.round(hover.current.y)} px` : `${fmtUnit(hover.current.x)}, ${fmtUnit(hover.current.y)}`;
   };
 
   const onUp = (e: React.PointerEvent) => {

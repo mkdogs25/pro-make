@@ -8,7 +8,7 @@ import {
   selectionBounds, selectionToPath, selectNone, invertSelection, sharpenSelection, shrinkSelection, strokeSelection, toggleQuickMask, cropPageTo, CHANNELS, fillSelection,
 } from '../grain';
 import { addPage, align, booleanOp, breakApart, combine, deletePage, duplicate, duplicatePage, flip, flattenPage, movePage, objectToPath, rasterise, newRasterLayer, reversePaths, simplifyPaths, zorder, paintTarget } from '../ops';
-import { addNodes, autoSmooth, groupSel, offsetPaths, releaseClip, roughen, setClip, strokeToPath, ungroupSel } from '../ink';
+import { addNodes, autoSmooth, groupSel, offsetPaths, releaseClip, roughen, setClip, strokeToPath, textToOutlines, ungroupSel } from '../ink';
 import { PAGE_PRESETS } from '../model';
 import { ask } from './GrainModals';
 
@@ -34,6 +34,7 @@ function objectMenu(): (MenuItem | 'sep')[] {
     { label: 'Flip horizontally', onClick: () => flip('h'), disabled: !has },
     { label: 'Flip vertically', onClick: () => flip('v'), disabled: !has },
     'sep',
+    { label: 'Text to outlines', onClick: textToOutlines, disabled: !selected().some(o => o.type === 'text') },
     { label: 'Rasterise for Grain', onClick: rasterise, disabled: !has },
   ];
 }

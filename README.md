@@ -18,17 +18,39 @@ Switch modes from the top bar, or press **Alt+1 … Alt+4**.
 - **Motion animates pages.** A *scene clip* on the timeline plays a page, with keyframes on position, rotation, scale and opacity. With auto-key on, dragging objects in the Motion preview records keyframes.
 - **Vector to pixel.** *Rasterise* turns any vector, text or placed object into a pixel layer that Grain tools can paint on.
 
-## Features
+## What's in each studio
 
-**Shared:** layers (visibility, lock, opacity, blend modes), properties inspector, colour palette, undo/redo, copy/paste/duplicate, rulers and guides, snapping, zoom and pan, keyboard shortcuts (press `?`), a parchment light theme and a dark theme, local autosave in IndexedDB, and `.promake` project files with embedded media.
+The full itemised list, including what is *not* built, is in **[FEATURES.md](FEATURES.md)**. Highlights:
 
-**Motion:** video and audio tracks (add, rename, hide, mute, lock), drag-and-drop from the media bin, moving clips between tracks, trimming, splitting (`S`), ripple delete, snapping, fade in/out, speed, volume, brightness/contrast/saturation/hue/blur/greyscale/sepia, title generator, audio waveforms, a keyframe lane with drag-to-retime, looping, frame stepping, and real-time video rendering with audio.
+- **Motion**: multi-track timeline with transitions (dissolve, wipes, slides, iris…), a per-clip filter stack including chroma key, keyframes on position/scale/rotation/opacity/volume, markers and in/out points, insert/overwrite/append from a source player, titles and generators, an audio mixer with a level meter, scopes, and export to WebM/MP4, animated GIF, PNG sequence or audio.
+- **Ink**: pen, pencil, calligraphy, spiral, shapes, node editing, booleans, offset/inset, stroke to path, groups, clip masks, trace bitmap, tiled clones, text on a path, text to outlines, patterns, gradients, markers, blur and shadow, a symbols library, transform dialog with skew, SVG in and out.
+- **Print**: master pages, margins/columns/bleed, threaded multi-column text with wrap-around, drop caps and rich text, paragraph styles, image frames, tables, story editor, find & replace, table of contents, preflight, and PDF export with bleed, crop marks, bookmarks and links.
+- **Grain**: layers with masks and lock-alpha, a full brush engine (shapes, symmetry, pressure, airbrush, clone, heal, blur, sharpen), selections with quick mask and channels, curves/levels/colour balance and 40+ filters with live preview, gradients, image resizing and rotation, a history panel, and OpenRaster files that open in GIMP and Krita.
 
-**Ink:** select, move, scale and rotate (Shift to constrain, Alt-drag to duplicate); node editing (drag nodes and handles, double-click to add, Delete or Alt-click to remove, smooth/corner); Bézier pen; freehand pencil with smoothing; rectangles with corner radius; ellipses; stars and polygons; text; linear and radial gradients with stop editing; the gradient tool; eyedropper; union, difference, intersection, exclusion and division; object to path, simplify, reverse, combine and break apart; align and distribute; z-order; flip; dashes, caps and joins; SVG import and export.
+Shared by all four: layers, undo history, rulers in px/mm/in/pt, guides and grid, a colour mixer with CMYK values, autosave, `.promake` project files, and a script console.
 
-**Print:** page presets (A4, A5, Letter, square, HD, story), master pages with automatic `{page}` numbers, margins, column guides, bleed, multi-column text frames, text threading across frames and pages (Link tool) with overflow markers, paragraph styles that update every frame that uses them, frame backgrounds, image placement, page thumbnails and reordering, preflight checks (overflowing text, low-resolution images, objects off the page), and multi-page PDF export at 300 ppi.
+## Scripting
 
-**Grain:** paintbrush (size, hardness, opacity, flow), pencil, eraser, smudge, clone (Alt-click a source), dodge, burn, bucket fill with threshold, gradient fill, rectangle, ellipse, lasso and fuzzy selection with add, subtract and intersect modes, invert, fill or clear the selection, crop a layer or the canvas, and live-preview filters: brightness/contrast, hue/saturation, levels, colour temperature, Gaussian blur, sharpen, film grain, vignette, pixelate, posterise, threshold, edge detect, emboss, invert, desaturate and sepia.
+Open **Edit → Script console…** to automate anything the editor can do. The `promake` object is also available in the browser console.
+
+```js
+// A grid of circles, then a bounce animation on the selection
+for (let r = 0; r < 4; r++) for (let c = 0; c < 6; c++)
+  promake.ellipse(120 + c * 90, 120 + r * 90, 70, 70, { fill: `hsl(${(r * 6 + c) * 14}, 75%, 60%)`, stroke: null, strokeWidth: 0 });
+promake.commit('Script: grid');
+```
+
+Helpers: `rect`, `ellipse`, `star`, `text`, `path(d)`, `objects`, `selected()`, `commit()`, plus the modules `ops`, `ink`, `grain`, `motion`, `io` and `geometry`.
+
+## File formats
+
+| | Open | Save / export |
+|---|---|---|
+| Project | `.promake` | `.promake` |
+| Vector | SVG | SVG, PDF |
+| Images | PNG, JPEG, WebP, GIF, BMP | PNG, JPEG, WebP |
+| Layered | OpenRaster `.ora` | OpenRaster `.ora` |
+| Video | any format your browser plays | WebM/MP4, GIF, PNG sequence (.zip), audio-only |
 
 ## Development
 
@@ -56,6 +78,17 @@ Built with React, TypeScript and Vite. Rendering uses Canvas 2D; [paper.js](http
 | `src/io.ts` | Project files, autosave, import, PNG/JPEG/SVG/PDF/video export |
 | `src/ui/` | Stage (canvas and tools), panels, timeline, controls, icons |
 
+## Source map (additions)
+
+| File | Responsibility |
+|---|---|
+| `src/ink.ts` | Groups, clips, tiling, trace, offset, node operations, symbols |
+| `src/brush.ts` | Brush engine with targets for layers, masks and quick mask |
+| `src/pixfx.ts`, `src/clipfx.ts` | Pixel filters and Motion clip filters |
+| `src/motion.ts`, `src/audio.ts` | Timeline operations, keyframes, mixer |
+| `src/ora.ts`, `src/zip.ts`, `src/gif.ts` | OpenRaster, ZIP and GIF writers |
+| `src/api.ts` | Script API |
+
 ## Known limits
 
-This first version covers a broad core of each editor. Next candidates: object groups, text on a path, vector text-to-outlines, layer masks and curves in Grain, transitions beyond crossfades in Motion, and CMYK/vector PDF output. PDF pages are currently rasterised at 300 ppi rather than exported as vectors.
+ProMake does not try to be a complete replacement for the four programs that inspired it; see [FEATURES.md](FEATURES.md) for an honest list of what is built, partly built and missing. The main gaps: PDF pages are images by default (a vector option exists with standard fonts), no CMYK/spot-colour output, no non-destructive filter layers, no XCF/PSD, and video encoding runs in real time through the browser.

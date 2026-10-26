@@ -6,7 +6,7 @@ import type { Obj, SubPath, PNode } from './model';
 import {
   anim, apply, dist, dToSubpaths, localBox, mapNodes, node, objMatrix, pageBox, recentrePath, setProp, skewMatrix, splitSegment, toPathObj, unionBox, type Pt,
 } from './geometry';
-import { currentLayerId, editTime, fromPaper, toPaper, addObj } from './ops';
+import { currentLayerId, editTime, fromPaper, toPaper, addObj, renderObjectsToCanvas } from './ops';
 import { rasterCanvas } from './raster';
 
 // ---------- groups ----------
@@ -531,3 +531,31 @@ export function insertSymbol(sym: Symbol) {
   commit();
 }
 
+
+/** Turn text into editable vector outlines by rendering it large and tracing the shapes. */
+export function textToOutlines() {
+  const pg = page(), t = editTime();
+  const texts = selected().filter(o => o.type === 'text' && isEditable(o));
+  if (!texts.length) { toast('Select text to convert'); return; }
+  const K = 4;
+  const made: Obj[] = [];
+  for (const o of texts) {
+    const b = pageBox(o, t);
+    const box = { x: Math.floor(b.x) - 4, y: Math.floor(b.y) - 4, w: Math.ceil(b.w) + 8, h: Math.ceil(b.h) + 8 };
+    const c = renderObjectsToCanvas([{ ...o, textPath: o.textPath }], box, t, K);
+    const d = c.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, c.width, c.height).data;
+    const mask = new Uint8Array(c.width * c.height);
+    for (let i = 0; i < mask.length; i++) mask[i] = d[i * 4 + 3] > 127 ? 1 : 0;
+    const sps = mapNodes(maskToSubpaths(mask, c.width, c.height, 0.35, 3), new DOMMatrix().translate(box.x, box.y).scale(1 / K));
+    if (!sps.length) continue;
+    const out = newObj('path', o.layerId, { name: `${o.name} (outlines)`, subpaths: sps, fill: o.fill, stroke: null, strokeWidth: 0, fillRule: 'evenodd', opacity: anim(o, t).opacity, blend: o.blend });
+    recentrePath(out);
+    const i = pg.objects.indexOf(o);
+    pg.objects.splice(i, 1, out);
+    made.push(out);
+  }
+  if (!made.length) { toast('That text has nothing to outline'); return; }
+  S.ui.sel = made.map(o => o.id);
+  commit('Text to outlines');
+  toast('Text converted to editable shapes. It no longer reflows when you edit it.');
+}

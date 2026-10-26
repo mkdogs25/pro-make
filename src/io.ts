@@ -1,6 +1,5 @@
 import P from 'paper';
-import { jsPDF } from 'jspdf';
-import { svg2pdf } from 'svg2pdf.js';
+import type { jsPDF } from 'jspdf';
 import { S, T, commit, emit, emitTime, page, replaceDoc, toast, afterCommit } from './store';
 import type { Doc, Obj, Page, Paint } from './model';
 import { newObj, isPattern } from './model';
@@ -446,6 +445,7 @@ export async function exportPDF(arg: Partial<PdfOpts> | boolean = {}) {
   const pages = opts.scope === 'all' ? S.doc.pages.filter(p => !p.isMaster) : [page()];
   toast(`Rendering ${pages.length} page${pages.length > 1 ? 's' : ''} to PDF…`);
   await new Promise(r => setTimeout(r, 30));
+  const [{ jsPDF: JsPDF }, { svg2pdf }] = await Promise.all([import('jspdf'), import('svg2pdf.js')]);
   let pdf: jsPDF | null = null;
   const nonMaster = S.doc.pages.filter(p => !p.isMaster);
   for (let pi = 0; pi < pages.length; pi++) {
@@ -454,7 +454,7 @@ export async function exportPDF(arg: Partial<PdfOpts> | boolean = {}) {
     const W = pg.w + off * 2, H = pg.h + off * 2;
     const wPt = W * 0.75, hPt = H * 0.75;
     const orient = wPt > hPt ? 'landscape' : 'portrait';
-    if (!pdf) pdf = new jsPDF({ unit: 'pt', format: [wPt, hPt], orientation: orient });
+    if (!pdf) pdf = new JsPDF({ unit: 'pt', format: [wPt, hPt], orientation: orient });
     else pdf.addPage([wPt, hPt], orient);
     if (opts.vector) {
       const svg = new DOMParser().parseFromString(pageToSVG(pg, 0), 'image/svg+xml').documentElement;

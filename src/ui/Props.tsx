@@ -357,6 +357,13 @@ function PageProps() {
       )}
       {(
         <Section title="Guides" open={mode === 'print'}>
+          {mode === 'print' && (
+            <>
+              <label className="check"><input type="checkbox" checked={S.ui.baseline.show} onChange={e => { S.ui.baseline.show = e.target.checked; emit(); }} /> Show baseline grid</label>
+              <div className="row"><Num label="Baseline" value={S.ui.baseline.size} min={4} max={100} unit="px" onChange={v => { S.ui.baseline.size = Math.round(v); emit(); }} />
+                <label className="check"><input type="checkbox" checked={S.ui.baseline.snap} onChange={e => { S.ui.baseline.snap = e.target.checked; emit(); }} /> Snap</label></div>
+            </>
+          )}
           <label className="check"><input type="checkbox" checked={S.ui.grid.show} onChange={e => { S.ui.grid.show = e.target.checked; emit(); }} /> Show grid</label>
           <div className="row"><Num label="Grid" value={S.ui.grid.size} min={2} max={400} unit="px" onChange={v => { S.ui.grid.size = Math.round(v); emit(); }} />
             <label className="check"><input type="checkbox" checked={S.ui.grid.snap} onChange={e => { S.ui.grid.snap = e.target.checked; emit(); }} /> Snap</label></div>

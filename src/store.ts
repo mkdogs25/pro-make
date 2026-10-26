@@ -52,6 +52,8 @@ export interface UI {
   recent: string[];
   selTrack: string | null;
   ripple: boolean;
+  unit: 'px' | 'mm' | 'in' | 'pt';
+  baseline: { show: boolean; size: number; snap: boolean };
 }
 
 const initialDoc = sampleDoc();
@@ -102,6 +104,8 @@ export const S: { doc: Doc; ui: UI } = {
     recent: [],
     selTrack: null,
     ripple: false,
+    unit: 'px',
+    baseline: { show: false, size: 18, snap: false },
   },
 };
 
@@ -189,6 +193,9 @@ export function replaceDoc(doc: Doc) {
 }
 
 // ---------- helpers ----------
+/** CSS pixels per display unit. */
+export const UNIT_PX = { px: 1, mm: 96 / 25.4, in: 96, pt: 96 / 72 } as const;
+export const fmtUnit = (px: number) => { const u = S.ui.unit; const v = px / UNIT_PX[u]; return `${u === 'px' ? Math.round(v) : Math.round(v * 100) / 100} ${u}`; };
 export const page = (): Page => S.doc.pages.find(p => p.id === S.ui.pageId) || S.doc.pages[0];
 export const allObjects = () => S.doc.pages.flatMap(p => p.objects);
 export function findObj(id: string): { obj: Obj; page: Page } | null {

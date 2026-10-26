@@ -529,3 +529,6 @@ input[type="range"] { accent-color: var(--accent); width: 100%; height: 16px; }
 .hist.future { opacity: .5; }
 .text-area.code { font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.5; white-space: pre; overflow: auto; }
 .script-out { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--panel-3); font-family: 'JetBrains Mono', monospace; font-size: 11.5px; min-height: 54px; max-height: 140px; overflow: auto; white-space: pre-wrap; }
+.unit-select { height: 22px; width: 54px; padding: 0 2px; font-size: 11.5px; }
+.tool-options > * { flex-shrink: 0; }
+.tool-options > .tool-hint { flex-shrink: 1; }
