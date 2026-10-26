@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Icon } from './icons';
-import type { Gradient, Paint } from '../model';
+import type { Gradient, Paint, PatternKind } from '../model';
+import { isGradient, isPattern } from '../model';
 import { S } from '../store';
 
 export function IconBtn({ icon, title, onClick, active, disabled, size = 16, className = '', children }: {
@@ -120,33 +121,57 @@ export function ColourInput({ value, onChange, onCommit, title }: { value: strin
   );
 }
 
-export const paintCss = (p: Paint) => !p ? 'transparent' : typeof p === 'string' ? p :
-  `${p.kind === 'radial' ? 'radial-gradient(circle' : `linear-gradient(${p.angle + 90}deg`}, ${p.stops.map(s => `${s.c} ${s.o * 100}%`).join(', ')})`;
+export const paintCss = (p: Paint): string => {
+  if (!p) return 'transparent';
+  if (typeof p === 'string') return p;
+  if (isPattern(p)) return p.c1;
+  return `${p.kind === 'radial' ? 'radial-gradient(circle' : `linear-gradient(${p.angle + 90}deg`}, ${p.stops.map(s => `${s.c} ${s.o * 100}%`).join(', ')})`;
+};
 
-/** Fill/stroke editor: none, flat colour, linear or radial gradient. */
+const PATTERNS: { value: PatternKind; label: string }[] = [
+  { value: 'stripes', label: 'Stripes' }, { value: 'diagonal', label: 'Diagonal stripes' }, { value: 'dots', label: 'Polka dots' }, { value: 'checks', label: 'Checks' },
+  { value: 'grid', label: 'Grid' }, { value: 'cross', label: 'Crosses' }, { value: 'waves', label: 'Waves' },
+];
+
+/** Fill/stroke editor: none, flat colour, linear or radial gradient, or a pattern. */
 export function PaintField({ value, onChange, onCommit, allowNone = true }: { value: Paint; onChange: (p: Paint) => void; onCommit: () => void; allowNone?: boolean }) {
   const kind = !value ? 'none' : typeof value === 'string' ? 'flat' : value.kind;
-  const first = typeof value === 'string' ? value : value ? value.stops[0].c : S.ui.fg;
+  const first = typeof value === 'string' ? value : isGradient(value) ? value.stops[0].c : isPattern(value) ? value.c2 : S.ui.fg;
   const setKind = (k: string) => {
     if (k === 'none') onChange(null);
     else if (k === 'flat') onChange(first);
+    else if (k === 'pattern') onChange(isPattern(value) ? value : { kind: 'pattern', pattern: 'stripes', c1: '#FFFDF7', c2: first, size: 16, angle: 0 });
     else {
-      const g: Gradient = value && typeof value !== 'string' ? { ...value, kind: k as 'linear' | 'radial' } : { kind: k as 'linear' | 'radial', angle: 90, stops: [{ o: 0, c: first }, { o: 1, c: S.ui.bg }] };
+      const g: Gradient = isGradient(value) ? { ...value, kind: k as 'linear' | 'radial' } : { kind: k as 'linear' | 'radial', angle: 90, stops: [{ o: 0, c: first }, { o: 1, c: S.ui.bg }] };
       onChange(g);
     }
     onCommit();
   };
+  const kinds = allowNone ? ['none', 'flat', 'linear', 'radial', 'pattern'] : ['flat', 'linear', 'radial', 'pattern'];
   return (
     <div className="paint-field">
       <div className="seg">
-        {(allowNone ? ['none', 'flat', 'linear', 'radial'] : ['flat', 'linear', 'radial']).map(k => (
-          <button key={k} className={kind === k ? 'on' : ''} onClick={() => setKind(k)} title={k === 'none' ? 'No paint' : k === 'flat' ? 'Flat colour' : `${k[0].toUpperCase()}${k.slice(1)} gradient`}>
+        {kinds.map(k => (
+          <button key={k} className={kind === k ? 'on' : ''} onClick={() => setKind(k)} title={k === 'none' ? 'No paint' : k === 'flat' ? 'Flat colour' : k === 'pattern' ? 'Pattern' : `${k[0].toUpperCase()}${k.slice(1)} gradient`}>
             <span className={`paint-chip k-${k}`} />
           </button>
         ))}
       </div>
       {typeof value === 'string' && <ColourInput value={value} onChange={onChange} onCommit={onCommit} />}
-      {value && typeof value !== 'string' && (
+      {isPattern(value) && (
+        <div className="gradient-edit">
+          <Select value={value.pattern} options={PATTERNS} onChange={v => { onChange({ ...value, pattern: v }); onCommit(); }} />
+          <div className="row">
+            <ColourInput value={value.c1} onChange={c => onChange({ ...value, c1: c })} onCommit={onCommit} title="Background" />
+            <ColourInput value={value.c2} onChange={c => onChange({ ...value, c2: c })} onCommit={onCommit} title="Pattern colour" />
+          </div>
+          <div className="grid2">
+            <Num label="Size" value={value.size} min={4} max={200} onChange={v => onChange({ ...value, size: v })} onCommit={onCommit} />
+            <Num label="∠" value={value.angle} unit="°" onChange={v => onChange({ ...value, angle: v })} onCommit={onCommit} />
+          </div>
+        </div>
+      )}
+      {isGradient(value) && (
         <div className="gradient-edit">
           <div className="gradient-bar" style={{ background: paintCss({ ...value, kind: 'linear', angle: 0 }) }} />
           {value.stops.map((s, i) => (

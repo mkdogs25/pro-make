@@ -12,8 +12,10 @@
   "dependencies": {
     "jspdf": "^2.5.2",
     "paper": "^0.12.18",
+    "paperjs-offset": "^1.0.8",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "svg2pdf.js": "^2.2.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.25.0",

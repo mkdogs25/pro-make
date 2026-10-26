@@ -9,9 +9,13 @@ import Stage, { stageApi, nodeApi, isTyping } from './ui/Stage';
 import Props from './ui/Props';
 import { LayersPanel, PagesPanel, StylesPanel, AdjustPanel, MediaPanel } from './ui/Panels';
 import Timeline from './ui/Timeline';
+import { ColourPanel } from './ui/ColourPanel';
+import { SymbolsPanel } from './ui/SymbolsPanel';
+import { TraceModal, TilesModal } from './ui/InkModals';
 import { copySel, cutSel, paste, duplicate, deleteSelection, deleteClip, splitClip, editTime, booleanOp, zorder } from './ops';
 import { saveProject, openProject, importFiles, pickFiles, exportPNG, exportJPEG, exportSVG, exportPDF, exportVideo, exportState, newDocument, restoreAutosave, startAutosave } from './io';
 import { togglePlay, seek, pause } from './playback';
+import { groupSel, ungroupSel } from './ink';
 import { FILTERS, Adjust, selectAllPixels, selectNone, invertSelection, fillSelection, hasSelection } from './grain';
 import { setProp, anim } from './geometry';
 import { layoutAll, invalidateText } from './text';
@@ -137,7 +141,17 @@ function ToolOptions() {
         {!S.ui.star.polygon && <Num label="Inner" value={Math.round(S.ui.star.inner * 100)} min={5} max={100} unit="%" width={92} onChange={v => { S.ui.star.inner = v / 100; emit(); }} />}
         <label className="check"><input type="checkbox" checked={S.ui.star.polygon} onChange={e => { S.ui.star.polygon = e.target.checked; emit(); }} /> Polygon</label>
       </>}
-      {['rect', 'ellipse', 'star', 'pen', 'pencil'].includes(t) && mode !== 'grain' && <Num label="Stroke" value={S.ui.strokeWidth} min={0} step={0.5} width={92} onChange={v => { S.ui.strokeWidth = v; emit(); }} />}
+      {['rect', 'ellipse', 'star', 'pen', 'pencil', 'line', 'spiral'].includes(t) && mode !== 'grain' && <Num label="Stroke" value={S.ui.strokeWidth} min={0} step={0.5} width={92} onChange={v => { S.ui.strokeWidth = v; emit(); }} />}
+      {t === 'spiral' && <Num label="Turns" value={S.ui.spiralTurns} min={1} max={20} step={0.5} width={92} onChange={v => { S.ui.spiralTurns = v; emit(); }} />}
+      {t === 'calli' && <>
+        <Num label="Width" value={S.ui.calli.width} min={1} max={80} width={96} onChange={v => { S.ui.calli.width = v; emit(); }} />
+        <Num label="Angle" value={S.ui.calli.angle} unit="°" width={100} onChange={v => { S.ui.calli.angle = v; emit(); }} />
+        <Num label="Thinning" value={S.ui.calli.thinning} min={0} max={100} unit="%" width={116} onChange={v => { S.ui.calli.thinning = v; emit(); }} />
+      </>}
+      {t === 'table' && <>
+        <Num label="Rows" value={S.ui.tableDef.rows} min={1} max={30} width={84} onChange={v => { S.ui.tableDef.rows = Math.round(v); emit(); }} />
+        <Num label="Columns" value={S.ui.tableDef.cols} min={1} max={12} width={104} onChange={v => { S.ui.tableDef.cols = Math.round(v); emit(); }} />
+      </>}
       {t === 'text' && <>
         <Select value={S.ui.textDefaults.font} options={FONTS.map(f => ({ value: f, label: f }))} onChange={v => { S.ui.textDefaults.font = v; sel.filter(o => o.type === 'text').forEach(o => (o.font = v)); commit(); }} width={150} />
         <Num label="Size" value={S.ui.textDefaults.size} min={4} width={86} onChange={v => { S.ui.textDefaults.size = v; emit(); }} />
@@ -192,9 +206,9 @@ function StatusBar() {
 // ---------------- sidebar ----------------
 const TABS: Record<Mode, { id: string; label: string; icon: string }[]> = {
   motion: [{ id: 'props', label: 'Inspector', icon: 'sliders' }, { id: 'media', label: 'Media', icon: 'film' }, { id: 'layers', label: 'Layers', icon: 'layers' }],
-  ink: [{ id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'props', label: 'Properties', icon: 'sliders' }],
-  print: [{ id: 'pages', label: 'Pages', icon: 'pages' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'styles', label: 'Styles', icon: 'type' }, { id: 'layers', label: 'Layers', icon: 'layers' }],
-  grain: [{ id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'adjust', label: 'Adjust', icon: 'sparkle' }],
+  ink: [{ id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'symbols', label: 'Symbols', icon: 'symbols' }],
+  print: [{ id: 'pages', label: 'Pages', icon: 'pages' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'styles', label: 'Styles', icon: 'type' }, { id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'symbols', label: 'Symbols', icon: 'symbols' }],
+  grain: [{ id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'adjust', label: 'Adjust', icon: 'sparkle' }],
 };
 
 function Swatches() {
@@ -224,10 +238,10 @@ function Sidebar() {
   const tab = tabs.some(t => t.id === S.ui.sideTab) ? S.ui.sideTab : tabs[0].id;
   return (
     <aside className="sidebar">
-      <div className="side-tabs" role="tablist">
+      <div className={`side-tabs ${tabs.length > 4 ? 'many' : ''}`} role="tablist">
         {tabs.map(t => (
           <button key={t.id} role="tab" aria-selected={tab === t.id} className={tab === t.id ? 'on' : ''} onClick={() => { S.ui.sideTab = t.id; emit(); }}>
-            <Icon name={t.icon} size={14} /> {t.label}
+            <Icon name={t.icon} size={14} /> <span>{t.label}</span>
           </button>
         ))}
       </div>
@@ -238,6 +252,8 @@ function Sidebar() {
         {tab === 'styles' && <StylesPanel />}
         {tab === 'adjust' && <AdjustPanel />}
         {tab === 'media' && <MediaPanel />}
+        {tab === 'colour' && <ColourPanel />}
+        {tab === 'symbols' && <SymbolsPanel />}
       </div>
       {S.ui.mode !== 'motion' && <Swatches />}
     </aside>
@@ -385,6 +401,7 @@ function useShortcuts() {
         if (k === 'x') { cutSel(); return; }
         if (k === 'v') { e.preventDefault(); paste(); return; }
         if (k === 'd') { e.preventDefault(); duplicate(); return; }
+        if (k === 'g') { e.preventDefault(); if (e.shiftKey) ungroupSel(); else groupSel(); return; }
         if (k === 's') { e.preventDefault(); saveProject(); return; }
         if (k === 'o') { e.preventDefault(); openProject(); return; }
         if (k === 'e') { e.preventDefault(); exportPNG(); return; }
@@ -486,6 +503,8 @@ export default function App() {
       {m?.kind === 'preflight' && <Preflight />}
       {m?.kind === 'export-video' && <VideoProgress />}
       {m?.kind === 'shortcuts' && <Shortcuts />}
+      {m?.kind === 'trace' && <TraceModal />}
+      {m?.kind === 'tiles' && <TilesModal />}
       {S.ui.toast && <div className="toast" role="status">{S.ui.toast}</div>}
     </div>
   );

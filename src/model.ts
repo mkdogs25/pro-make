@@ -6,7 +6,11 @@ export type Mode = 'motion' | 'ink' | 'print' | 'grain';
 
 export interface GradientStop { o: number; c: string }
 export interface Gradient { kind: 'linear' | 'radial'; angle: number; stops: GradientStop[] }
-export type Paint = string | Gradient | null;
+export type PatternKind = 'stripes' | 'dots' | 'checks' | 'grid' | 'cross' | 'waves' | 'diagonal';
+export interface Pattern { kind: 'pattern'; pattern: PatternKind; c1: string; c2: string; size: number; angle: number }
+export type Paint = string | Gradient | Pattern | null;
+export const isGradient = (p: Paint): p is Gradient => !!p && typeof p !== 'string' && (p.kind === 'linear' || p.kind === 'radial');
+export const isPattern = (p: Paint): p is Pattern => !!p && typeof p !== 'string' && p.kind === 'pattern';
 
 /** A bezier node. Handles are absolute local coordinates; a handle equal to the node means "no handle". */
 export interface PNode { x: number; y: number; ix: number; iy: number; ox: number; oy: number; smooth?: boolean }
@@ -17,7 +21,9 @@ export const ANIM_PROPS: AnimProp[] = ['x', 'y', 'rotation', 'sx', 'sy', 'opacit
 export type Ease = 'linear' | 'ease' | 'in' | 'out' | 'hold';
 export interface Key { t: number; v: number; ease: Ease }
 
-export type ObjType = 'rect' | 'ellipse' | 'star' | 'path' | 'text' | 'raster' | 'embed';
+export type ObjType = 'rect' | 'ellipse' | 'star' | 'path' | 'text' | 'raster' | 'embed' | 'image' | 'table';
+export type Marker = 'none' | 'arrow' | 'triangle' | 'dot' | 'square' | 'diamond' | 'bar';
+export interface Shadow { dx: number; dy: number; blur: number; color: string }
 
 export interface Obj {
   id: string;
@@ -51,6 +57,24 @@ export interface Obj {
   src?: string; rev?: string;
   // embed (a live placement of another page)
   pageId?: string;
+  // shared extras
+  group?: string;                    // objects with the same group id move and select together
+  clipBy?: string;                   // id of the object whose outline clips this one
+  isClip?: boolean;                  // this object is used as a clip outline and isn't drawn itself
+  blur?: number;                     // object blur radius (page units)
+  shadow?: Shadow | null;
+  markerStart?: Marker; markerEnd?: Marker;
+  // text extras
+  textPath?: string | null;          // id of a path to run the text along
+  textOffset?: number;
+  indent?: number; paraSpace?: number; valign?: 'top' | 'middle' | 'bottom'; markup?: boolean; wordSpacing?: number;
+  // image frame (Print)
+  fit?: 'fit' | 'fill' | 'stretch' | 'none'; imgX?: number; imgY?: number; imgScale?: number; imgRot?: number;
+  // table (Print)
+  rows?: number; cols?: number; cells?: string[][]; colW?: number[]; rowH?: number[]; pad?: number;
+  headerFill?: string | null; header?: boolean; zebra?: string | null; borderColor?: string; borderW?: number;
+  // raster extras (Grain)
+  maskSrc?: string; maskRev?: string; lockAlpha?: boolean;
 }
 
 export interface Layer { id: string; name: string; visible: boolean; locked: boolean; opacity: number; open?: boolean }
@@ -72,17 +96,29 @@ export interface ParaStyle {
 export interface Media { id: string; kind: 'video' | 'audio' | 'image'; name: string; url: string; duration: number; w: number; h: number }
 
 export interface ClipFx { brightness: number; contrast: number; saturate: number; hue: number; blur: number; grayscale: number; sepia: number }
+export type FilterType = 'invert' | 'mirror' | 'flip' | 'crop' | 'chroma' | 'vignette' | 'pixelate' | 'sharpen' | 'glow' | 'tint' | 'posterize' | 'noise' | 'rotate' | 'scale' | 'wave' | 'duotone';
+export interface ClipFilter { id: string; type: FilterType; on: boolean; params: Record<string, number | string> }
+export type TransitionType = 'dissolve' | 'wipel' | 'wiper' | 'wipeu' | 'wiped' | 'slidel' | 'slider' | 'zoom' | 'dip' | 'iris' | 'barn';
+export type ClipProp = 'x' | 'y' | 'scale' | 'rotation' | 'opacity' | 'volume';
+export const CLIP_PROPS: ClipProp[] = ['x', 'y', 'scale', 'rotation', 'opacity', 'volume'];
 export interface Clip {
-  id: string; kind: 'scene' | 'media' | 'title'; name: string;
+  id: string; kind: 'scene' | 'media' | 'title' | 'color' | 'countdown' | 'bars'; name: string;
   mediaId?: string; pageId?: string;
   start: number; dur: number; offset: number; speed: number;
   volume: number; opacity: number; fadeIn: number; fadeOut: number;
   x: number; y: number; scale: number;
   fx: ClipFx;
   text?: string; fontSize?: number; color?: string; font?: string;
+  filters?: ClipFilter[]; trans?: TransitionType; keys?: Partial<Record<ClipProp, Key[]>>;
+  rotation?: number; freeze?: boolean; pan?: number;
+  // title extras
+  weight?: number; italic?: boolean; align?: CanvasTextAlign; outline?: number; outlineColor?: string;
+  shadow?: boolean; box?: string | null; anim?: 'none' | 'fade' | 'slideup' | 'typewriter' | 'zoom' | 'slideleft'; letterSpacing?: number;
+  color2?: string; seconds?: number;
 }
-export interface Track { id: string; kind: 'video' | 'audio'; name: string; muted: boolean; hidden: boolean; locked: boolean; clips: Clip[] }
-export interface Timeline { w: number; h: number; fps: number; tracks: Track[]; loop: boolean }
+export interface Track { id: string; kind: 'video' | 'audio'; name: string; muted: boolean; hidden: boolean; locked: boolean; clips: Clip[]; volume?: number; pan?: number; solo?: boolean; tall?: boolean }
+export interface Marker2 { id: string; t: number; label: string; color: string }
+export interface Timeline { w: number; h: number; fps: number; tracks: Track[]; loop: boolean; markers?: Marker2[]; inPoint?: number | null; outPoint?: number | null; master?: number }
 
 export interface Doc {
   version: 1;
@@ -113,6 +149,12 @@ export function newObj(type: ObjType, layerId: string, props: Partial<Obj> = {})
   });
   if (type === 'star') Object.assign(base, { points: 5, inner: 0.45, polygon: false });
   if (type === 'raster') Object.assign(base, { fill: null, stroke: null, strokeWidth: 0 });
+  if (type === 'image') Object.assign(base, { fill: '#EFE6D2', stroke: null, strokeWidth: 0, w: 300, h: 200, fit: 'fill', imgX: 0, imgY: 0, imgScale: 1, imgRot: 0 });
+  if (type === 'table') Object.assign(base, {
+    w: 480, h: 150, rows: 3, cols: 3, cells: [['Item', 'Detail', 'Value'], ['', '', ''], ['', '', '']], pad: 8, header: true,
+    headerFill: '#E9D9B8', zebra: null, borderColor: '#8A7860', borderW: 1, font: 'Inter', size: 14, weight: 400, italic: false,
+    lineHeight: 1.3, align: 'left', fill: '#3B2F22', stroke: null, strokeWidth: 0, frameFill: null,
+  });
   if (type === 'embed') Object.assign(base, { fill: null, stroke: null, strokeWidth: 0 });
   return Object.assign(base, props);
 }

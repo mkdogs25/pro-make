@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import P from 'paper/dist/paper-core';
+import P from 'paper';
 import { S, T, commit, emit, page, useStore, useTime, toast, isEditable, layerOf, findObj } from '../store';
 import { newObj } from '../model';
 import type { Obj, PNode } from '../model';
@@ -9,9 +9,10 @@ import {
 } from '../geometry';
 import { renderFrame, renderPage, sceneMatrix } from '../render';
 import { layoutAll } from '../text';
-import { addObj, contentMatrix, currentLayerId, editTime, fromPaper, linkFrames, paintTarget, threadHead, activeSceneClip } from '../ops';
+import { addObj, cloneObjects, contentMatrix, currentLayerId, editTime, fromPaper, linkFrames, paintTarget, threadHead, activeSceneClip } from '../ops';
 import { GS, Stroke, bucketFill, cropPageTo, gradientFill, magicWand, pickColour, selectNone, selectShape, setCloneSource, hasSelection, type BrushKind } from '../grain';
-import { importFiles, importImage, pickFiles } from '../io';
+import { importFiles, importImage, pickFiles, loadImageInto } from '../io';
+import { calligraphyPath, expandGroups, spiralPath } from '../ink';
 
 type Drag =
   | { kind: 'pan'; sx: number; sy: number; vx: number; vy: number }
@@ -20,7 +21,10 @@ type Drag =
   | { kind: 'rotate'; centre: Pt; a0: number; items: { o: Obj; x: number; y: number; r: number }[] }
   | { kind: 'marquee'; start: Pt; cur: Pt; add: boolean }
   | { kind: 'shape'; o: Obj; start: Pt }
-  | { kind: 'textbox'; start: Pt; cur: Pt }
+  | { kind: 'textbox'; start: Pt; cur: Pt; what: 'text' | 'table' | 'image' }
+  | { kind: 'spiral'; start: Pt; cur: Pt }
+  | { kind: 'lineobj'; start: Pt; cur: Pt }
+  | { kind: 'calli'; pts: Pt[] }
   | { kind: 'nodes'; o: Obj; start: Pt; orig: PNode[][] }
   | { kind: 'handle'; o: Obj; sp: number; i: number; which: 'i' | 'o' }
   | { kind: 'pen' }
@@ -28,7 +32,7 @@ type Drag =
   | { kind: 'sel'; shape: 'rect' | 'ell'; start: Pt; cur: Pt; mode: typeof S.ui.selMode }
   | { kind: 'lasso'; pts: Pt[]; mode: typeof S.ui.selMode }
   | { kind: 'paint'; stroke: Stroke }
-  | { kind: 'line'; start: Pt; cur: Pt; tool: 'gradient' | 'grad-ink' | 'crop' }
+  | { kind: 'line'; start: Pt; cur: Pt; tool: 'gradient' | 'grad-ink' | 'crop' | 'measure' }
   | { kind: 'guide'; axis: 'x' | 'y'; index: number };
 
 const scratch = document.createElement('canvas').getContext('2d')!;
@@ -145,6 +149,16 @@ export default function Stage() {
     const line = (a: Pt, b: Pt) => { const A = sp(a), B = sp(b); ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke(); };
     const poly = (pts: Pt[], close = true) => { ctx.beginPath(); pts.map(sp).forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y))); if (close) ctx.closePath(); };
 
+    // grid
+    if (S.ui.grid.show && mode !== 'motion') {
+      const gs = S.ui.grid.size;
+      if (gs * screenScale() >= 5) {
+        ctx.strokeStyle = 'rgba(120,90,60,0.16)'; ctx.lineWidth = 1; ctx.beginPath();
+        for (let x = 0; x <= pg.w; x += gs) { const a = sp({ x, y: 0 }), b2 = sp({ x, y: pg.h }); ctx.moveTo(Math.round(a.x) + 0.5, a.y); ctx.lineTo(Math.round(b2.x) + 0.5, b2.y); }
+        for (let y = 0; y <= pg.h; y += gs) { const a = sp({ x: 0, y }), b2 = sp({ x: pg.w, y }); ctx.moveTo(a.x, Math.round(a.y) + 0.5); ctx.lineTo(b2.x, Math.round(b2.y) + 0.5); }
+        ctx.stroke();
+      }
+    }
     // page furniture
     if (mode === 'print' || mode === 'ink') {
       ctx.lineWidth = 1;
@@ -277,6 +291,22 @@ export default function Stage() {
       if (d.shape === 'rect') poly(corners(b)); else { const c0 = sp({ x: b.x + b.w / 2, y: b.y + b.h / 2 }); ctx.beginPath(); ctx.ellipse(c0.x, c0.y, (b.w / 2) * screenScale(), (b.h / 2) * screenScale(), 0, 0, 7); }
       ctx.stroke(); ctx.strokeStyle = '#fff'; ctx.lineDashOffset = 5; ctx.stroke(); ctx.setLineDash([]); ctx.lineDashOffset = 0;
     }
+    if (d?.kind === 'lineobj') { ctx.strokeStyle = sel; ctx.lineWidth = 1.5; line(d.start, d.cur); }
+    if (d?.kind === 'spiral') {
+      const sp0 = spiralPath(d.start, dist(d.start, d.cur), S.ui.spiralTurns);
+      ctx.strokeStyle = sel; ctx.lineWidth = 1.5; poly(sp0.nodes.map(n => ({ x: n.x, y: n.y })), false); ctx.stroke();
+    }
+    if (d?.kind === 'calli') { const sp0 = calligraphyPath(d.pts, S.ui.calli.width, S.ui.calli.angle, S.ui.calli.thinning); if (sp0) { ctx.fillStyle = 'rgba(47,127,216,0.45)'; poly(sp0.nodes.map(n => ({ x: n.x, y: n.y }))); ctx.fill(); } }
+    if (S.ui.measure && (mode === 'ink' || mode === 'print')) {
+      const A = sp(S.ui.measure.a), B = sp(S.ui.measure.b);
+      ctx.strokeStyle = '#E0457B'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke();
+      for (const q of [A, B]) { ctx.beginPath(); ctx.arc(q.x, q.y, 3.5, 0, 7); ctx.fillStyle = '#E0457B'; ctx.fill(); }
+      const dx = S.ui.measure.b.x - S.ui.measure.a.x, dy = S.ui.measure.b.y - S.ui.measure.a.y;
+      const txt = `${Math.hypot(dx, dy).toFixed(1)} px · ${((Math.atan2(-dy, dx) * 180) / Math.PI).toFixed(1)}° · Δ ${dx.toFixed(0)}, ${dy.toFixed(0)}`;
+      ctx.font = '11.5px Inter'; const tw = ctx.measureText(txt).width + 14, mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2;
+      ctx.fillStyle = 'rgba(30,20,10,.85)'; ctx.beginPath(); ctx.roundRect(mx - tw / 2, my - 26, tw, 20, 10); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(txt, mx, my - 16); ctx.textAlign = 'left';
+    }
     if (d?.kind === 'lasso' || d?.kind === 'pencil') {
       ctx.strokeStyle = d.kind === 'lasso' ? '#111' : sel; ctx.setLineDash(d.kind === 'lasso' ? [5, 4] : []);
       poly(d.pts, false); ctx.stroke(); ctx.setLineDash([]);
@@ -375,7 +405,7 @@ export default function Stage() {
     const tol = 5 / screenScale();
     const list = renderOrder().reverse();
     for (const o of list) {
-      if (!filter(o)) continue;
+      if (!filter(o) || o.isClip) continue;
       const m = objMatrix(o, t);
       const l = apply(m.inverse(), p);
       const b = localBox(o);
@@ -399,6 +429,11 @@ export default function Stage() {
     const th = 6 / screenScale();
     const t = editTime();
     const xs = [0, pg.w / 2, pg.w, ...pg.guides.x], ys = [0, pg.h / 2, pg.h, ...pg.guides.y];
+    if (S.ui.grid.snap) {
+      const gs = S.ui.grid.size;
+      const nx = Math.round((box.x + dx) / gs) * gs, ny = Math.round((box.y + dy) / gs) * gs;
+      xs.push(nx, Math.round((box.x + dx + box.w) / gs) * gs); ys.push(ny, Math.round((box.y + dy + box.h) / gs) * gs);
+    }
     if (mode === 'print') { xs.push(pg.margins.l, pg.w - pg.margins.r); ys.push(pg.margins.t, pg.h - pg.margins.b); }
     for (const o of pg.objects) {
       if (exclude.has(o.id) || !o.visible) continue;
@@ -490,10 +525,12 @@ export default function Stage() {
         }
         const o = hit(p);
         if (o) {
-          if (e.shiftKey) S.ui.sel = S.ui.sel.includes(o.id) ? S.ui.sel.filter(x => x !== o.id) : [...S.ui.sel, o.id];
-          else if (!S.ui.sel.includes(o.id)) S.ui.sel = [o.id];
+          const within = e.ctrlKey || e.metaKey;
+          const ex = (ids: string[]) => (within ? ids : expandGroups(ids));
+          if (e.shiftKey) S.ui.sel = S.ui.sel.includes(o.id) ? S.ui.sel.filter(x => !ex([o.id]).includes(x)) : [...new Set([...S.ui.sel, ...ex([o.id])])];
+          else if (!S.ui.sel.includes(o.id) || within) S.ui.sel = ex([o.id]);
           if (e.altKey) {
-            const copies = selObjs().map(x => { const c: Obj = JSON.parse(JSON.stringify(x)); c.id = Math.random().toString(36).slice(2); c.linkNext = null; return c; });
+            const copies = cloneObjects(selObjs());
             pg.objects.push(...copies); S.ui.sel = copies.map(c => c.id);
           }
           const items = selObjs().filter(isEditable).map(x => { const a = anim(x, t); return { o: x, x: a.x, y: a.y }; });
@@ -517,9 +554,15 @@ export default function Stage() {
         return;
       }
       case 'text': {
-        drag.current = { kind: 'textbox', start: p, cur: p };
+        drag.current = { kind: 'textbox', start: p, cur: p, what: 'text' };
         return;
       }
+      case 'table': drag.current = { kind: 'textbox', start: p, cur: p, what: 'table' }; return;
+      case 'imgframe': drag.current = { kind: 'textbox', start: p, cur: p, what: 'image' }; return;
+      case 'line': drag.current = { kind: 'lineobj', start: p, cur: p }; return;
+      case 'spiral': drag.current = { kind: 'spiral', start: p, cur: p }; return;
+      case 'calli': drag.current = { kind: 'calli', pts: [p] }; return;
+      case 'measure': S.ui.measure = null; drag.current = { kind: 'line', start: p, cur: p, tool: 'measure' }; emit(); return;
       case 'node': {
         const o = selObjs().find(x => x.type === 'path' || ['rect', 'ellipse', 'star'].includes(x.type));
         if (o && o.type === 'path' && isEditable(o)) {
@@ -733,8 +776,13 @@ export default function Stage() {
         if (dist(l, n) * screenScale() > 3) { n.ox = l.x; n.oy = l.y; n.ix = 2 * n.x - l.x; n.iy = 2 * n.y - l.y; n.smooth = true; o.subpaths = [...o.subpaths!]; }
         break;
       }
-      case 'pencil': case 'lasso': d.pts.push(p); break;
-      case 'sel': case 'line': d.cur = p; break;
+      case 'pencil': case 'lasso': case 'calli': d.pts.push(p); break;
+      case 'sel': case 'line': case 'spiral': d.cur = p; break;
+      case 'lineobj': {
+        d.cur = p;
+        if (e.shiftKey) { const dx = p.x - d.start.x, dy = p.y - d.start.y, L = Math.hypot(dx, dy), a = Math.round(Math.atan2(dy, dx) / (Math.PI / 12)) * (Math.PI / 12); d.cur = { x: d.start.x + Math.cos(a) * L, y: d.start.y + Math.sin(a) * L }; }
+        break;
+      }
       case 'paint': d.stroke.to(p); break;
       case 'guide': {
         const v = d.axis === 'x' ? p.x : p.y;
@@ -765,7 +813,7 @@ export default function Stage() {
         const b = rectOf(d.start, d.cur);
         if (b.w > 2 || b.h > 2) {
           const ids = pg.objects.filter(o => isEditable(o)).filter(o => { const ob = pageBox(o, t); return ob.x >= b.x && ob.y >= b.y && ob.x + ob.w <= b.x + b.w && ob.y + ob.h <= b.y + b.h; }).map(o => o.id);
-          S.ui.sel = d.add ? [...new Set([...S.ui.sel, ...ids])] : ids;
+          S.ui.sel = expandGroups(d.add ? [...new Set([...S.ui.sel, ...ids])] : ids);
         }
         emit(); return;
       }
@@ -775,6 +823,21 @@ export default function Stage() {
       }
       case 'textbox': {
         const b = rectOf(d.start, d.cur);
+        if (d.what === 'table') {
+          const w = b.w > 40 ? b.w : 420, h = b.h > 30 ? b.h : S.ui.tableDef.rows * 34;
+          const cx = b.w > 40 ? b.x + w / 2 : d.start.x + w / 2, cy = b.h > 30 ? b.y + h / 2 : d.start.y + h / 2;
+          const { rows, cols } = S.ui.tableDef;
+          const o = newObj('table', currentLayerId(), { name: 'Table', x: cx, y: cy, w, h, rows, cols, cells: Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => (r === 0 ? `Column ${c + 1}` : ''))) });
+          addObj(o); commit(); S.ui.sideTab = 'props'; return;
+        }
+        if (d.what === 'image') {
+          const w = b.w > 20 ? b.w : 300, h = b.h > 20 ? b.h : 200;
+          const cx = b.w > 20 ? b.x + w / 2 : d.start.x + w / 2, cy = b.h > 20 ? b.y + h / 2 : d.start.y + h / 2;
+          const o = newObj('image', currentLayerId(), { name: 'Image frame', x: cx, y: cy, w, h, fill: mode === 'print' ? null : '#EFE6D2' });
+          addObj(o); commit();
+          pickFiles('image/*', false).then(fs => fs[0] && loadImageInto(o, fs[0]));
+          return;
+        }
         const size = S.ui.textDefaults.size;
         const big = b.w > 8 && b.h > 8;
         const o = newObj('text', currentLayerId(), {
@@ -800,6 +863,23 @@ export default function Stage() {
         recentrePath(o);
         addObj(o);
         commit(); return;
+      }
+      case 'lineobj': {
+        if (dist(d.start, d.cur) * screenScale() < 4) { emit(); return; }
+        const o = newObj('path', currentLayerId(), { name: 'Line', fill: null, stroke: S.ui.bg, strokeWidth: Math.max(1, S.ui.strokeWidth), subpaths: [{ closed: false, nodes: [node(d.start.x, d.start.y), node(d.cur.x, d.cur.y)] }] });
+        recentrePath(o); addObj(o); commit(); return;
+      }
+      case 'spiral': {
+        const r = dist(d.start, d.cur);
+        if (r * screenScale() < 6) { emit(); return; }
+        const o = newObj('path', currentLayerId(), { name: 'Spiral', fill: null, stroke: S.ui.bg, strokeWidth: Math.max(1, S.ui.strokeWidth), subpaths: [spiralPath(d.start, r, S.ui.spiralTurns)] });
+        recentrePath(o); addObj(o); commit(); return;
+      }
+      case 'calli': {
+        const sp = calligraphyPath(d.pts, S.ui.calli.width, S.ui.calli.angle, S.ui.calli.thinning);
+        if (!sp) { emit(); return; }
+        const o = newObj('path', currentLayerId(), { name: 'Calligraphy', fill: S.ui.fg, stroke: null, strokeWidth: 0, subpaths: [sp] });
+        recentrePath(o); addObj(o); commit(); return;
       }
       case 'sel': {
         const b = rectOf(d.start, d.cur);
@@ -846,6 +926,13 @@ export default function Stage() {
     if (tool === 'node') {
       const o = selObjs().find(x => x.type === 'path');
       if (o) { insertNodeNear(o, p); return; }
+    }
+    const im = hit(p, x => (x.type === 'image' || x.type === 'table') && isEditable(x));
+    if (im && tool === 'select') {
+      S.ui.sel = [im.id];
+      if (im.type === 'image') pickFiles('image/*', false).then(fs => fs[0] && loadImageInto(im, fs[0]));
+      else S.ui.sideTab = 'props';
+      emit(); return;
     }
     const o = hit(p, x => x.type === 'text' && isEditable(x));
     if (o && (tool === 'select' || tool === 'text')) { S.ui.sel = [o.id]; S.ui.editingText = o.id; emit(); }
@@ -958,7 +1045,14 @@ export default function Stage() {
   return (
     <div className="stage" ref={wrap}
       onDragOver={e => e.preventDefault()}
-      onDrop={e => { e.preventDefault(); const p = toPage(e); if (e.dataTransfer.files.length) importFiles([...e.dataTransfer.files], p || undefined); }}>
+      onDrop={e => {
+        e.preventDefault(); const p = toPage(e);
+        const files = [...e.dataTransfer.files];
+        if (!files.length) return;
+        const frame = p && files[0].type.startsWith('image/') && files[0].type !== 'image/svg+xml' ? hit(p, x => x.type === 'image' && isEditable(x)) : null;
+        if (frame) { loadImageInto(frame, files[0]); return; }
+        importFiles(files, p || undefined);
+      }}>
       <canvas ref={cv} style={{ cursor }}
         onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
         onPointerLeave={() => { hover.current = null; stageApi.redraw(); }}

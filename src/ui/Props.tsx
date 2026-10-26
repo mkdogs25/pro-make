@@ -9,6 +9,7 @@ import { Num, Slider, Select, Section, Row, Text, ColourInput, PaintField, IconB
 import { Icon } from './icons';
 import { layoutAll } from '../text';
 import { rasterCanvas } from '../raster';
+import { EffectsSection, MarkerSection, GroupSection, TransformSection, PathExtras, NodeSection, TextPathSection, TextExtras, TableProps, ImageProps } from './InkProps';
 
 const live = () => emit();
 
@@ -109,6 +110,8 @@ function ObjectProps({ objs }: { objs: Obj[] }) {
         </Row>
       </Section>
 
+      <EffectsSection objs={objs} />
+      {(mode === 'ink' || mode === 'print') && <MarkerSection o={o} objs={objs} />}
       {o.type === 'rect' && (
         <Section title="Rectangle">
           <Num label="Corner radius" value={o.rx || 0} min={0} onChange={v => each(x => (x.rx = v))} onCommit={commit} />
@@ -134,6 +137,9 @@ function ObjectProps({ objs }: { objs: Obj[] }) {
         </Section>
       )}
 
+      {o.type === 'table' && <TableProps o={o} />}
+      {o.type === 'image' && <ImageProps o={o} />}
+      {isText && objs.length === 1 && (mode === 'ink' || mode === 'print') && <TextPathSection o={o} />}
       <Section title="Arrange">
         <div className="btn-row">
           <IconBtn icon="alignL" title="Align left" onClick={() => align('left')} />
@@ -155,6 +161,8 @@ function ObjectProps({ objs }: { objs: Obj[] }) {
         </div>
       </Section>
 
+      {(mode === 'ink' || mode === 'print') && <GroupSection objs={objs} />}
+      {(mode === 'ink' || mode === 'print') && <TransformSection />}
       {(mode === 'ink' || mode === 'print') && shapes.length > 0 && (
         <Section title="Path">
           <div className="btn-row">
@@ -171,6 +179,7 @@ function ObjectProps({ objs }: { objs: Obj[] }) {
             <button className="btn small" onClick={combine}>Combine</button>
             <button className="btn small" onClick={breakApart}>Break apart</button>
           </div>
+          <PathExtras objs={objs} />
         </Section>
       )}
       {mode === 'ink' && S.ui.tools.ink === 'node' && o.type === 'path' && S.ui.nodeSel.length > 0 && (
@@ -181,6 +190,7 @@ function ObjectProps({ objs }: { objs: Obj[] }) {
           </div>
         </Section>
       )}
+      {S.ui.mode === 'ink' && S.ui.tools.ink === 'node' && o.type === 'path' && <NodeSection o={o} />}
       {o.type !== 'raster' && (
         <div className="pad"><button className="btn small block" onClick={rasterise}><Icon name="grid" size={14} /> Rasterise for Grain</button></div>
       )}
@@ -234,6 +244,7 @@ function TextProps({ objs }: { objs: Obj[] }) {
         <Num label="Columns" value={o.columns || 1} min={1} max={12} onChange={v => each(x => (x.columns = Math.round(v)))} onCommit={commit} />
         <Num label="Gutter" value={o.gutter || 0} min={0} onChange={v => each(x => (x.gutter = v))} onCommit={commit} />
       </div>
+      <TextExtras objs={objs} />
       <div className="field-label">Frame background</div>
       <Row>
         <label className="check"><input type="checkbox" checked={!!o.frameFill} onChange={e => { each(x => (x.frameFill = e.target.checked ? '#FFF6E0' : null)); commit(); }} /> Fill frame</label>
@@ -265,6 +276,7 @@ function RasterProps({ o }: { o: Obj }) {
     <Section title="Pixels">
       <p className="muted small">{c.width} × {c.height} px · effective resolution {dpi} ppi</p>
       {S.ui.mode !== 'grain' && <button className="btn small" onClick={() => { S.ui.mode = 'grain'; S.ui.tools.grain = 'brush'; emit(); }}><Icon name="brush" size={14} /> Paint in Grain</button>}
+      {(S.ui.mode === 'ink' || S.ui.mode === 'print') && <button className="btn small" onClick={() => { S.ui.modal = { kind: 'trace' }; emit(); }}><Icon name="pen" size={14} /> Trace bitmap…</button>}
     </Section>
   );
 }
@@ -402,6 +414,9 @@ function PageProps() {
       )}
       {(
         <Section title="Guides" open={mode === 'print'}>
+          <label className="check"><input type="checkbox" checked={S.ui.grid.show} onChange={e => { S.ui.grid.show = e.target.checked; emit(); }} /> Show grid</label>
+          <div className="row"><Num label="Grid" value={S.ui.grid.size} min={2} max={400} unit="px" onChange={v => { S.ui.grid.size = Math.round(v); emit(); }} />
+            <label className="check"><input type="checkbox" checked={S.ui.grid.snap} onChange={e => { S.ui.grid.snap = e.target.checked; emit(); }} /> Snap</label></div>
           <label className="check"><input type="checkbox" checked={S.ui.showGuides} onChange={e => { S.ui.showGuides = e.target.checked; emit(); }} /> Show guides</label>
           <label className="check"><input type="checkbox" checked={S.ui.snap} onChange={e => { S.ui.snap = e.target.checked; emit(); }} /> Snap to page, guides and objects</label>
           <p className="muted small">Drag from the rulers to add guides; drag a guide back onto a ruler to remove it.</p>

@@ -1,4 +1,4 @@
-import P from 'paper/dist/paper-core';
+import P from 'paper';
 import { S, T, commit, emit, page, selected, toast, findObj, isEditable } from './store';
 import { newObj, newPage, uid, defaultFx } from './model';
 import type { Clip, Layer, Media, Obj, Page, SubPath, Track } from './model';
@@ -54,14 +54,33 @@ export function deleteSelection() {
 
 // ---------- clipboard ----------
 let clip: Obj[] = [];
-export function copySel() { clip = JSON.parse(JSON.stringify(selected())); if (clip.length) toast(`Copied ${clip.length} object${clip.length > 1 ? 's' : ''}`); }
+export function copySel() {
+  const pg = page();
+  const need = new Set(S.ui.sel);
+  for (const o of pg.objects) if (need.has(o.id) && o.clipBy) need.add(o.clipBy);
+  clip = JSON.parse(JSON.stringify(pg.objects.filter(o => need.has(o.id)))); if (clip.length) toast(`Copied ${clip.length} object${clip.length > 1 ? 's' : ''}`); }
 export function cutSel() { copySel(); deleteSelection(); }
+/** Deep-copy objects with fresh ids, keeping groups and clip relationships intact among the copies. */
+export function cloneObjects(src: Obj[]): Obj[] {
+  const items: Obj[] = JSON.parse(JSON.stringify(src));
+  const idmap = new Map<string, string>(), gmap = new Map<string, string>();
+  for (const o of items) { idmap.set(o.id, uid()); if (o.group && !gmap.has(o.group)) gmap.set(o.group, uid('g')); }
+  for (const o of items) {
+    o.id = idmap.get(o.id)!;
+    if (o.group) o.group = gmap.get(o.group);
+    if (o.clipBy) o.clipBy = idmap.get(o.clipBy);
+    if (o.textPath) o.textPath = idmap.get(o.textPath) ?? o.textPath;
+    o.linkNext = null;
+  }
+  return items;
+}
+
 export function paste(offset = 16) {
   if (!clip.length) return;
-  const items: Obj[] = JSON.parse(JSON.stringify(clip));
+  const items = cloneObjects(clip);
   const layerIds = new Set(S.doc.layers.map(l => l.id));
   for (const o of items) {
-    o.id = uid(); o.x += offset; o.y += offset; o.linkNext = null;
+    o.x += offset; o.y += offset;
     if (o.keys?.x) o.keys.x.forEach(k => (k.v += offset));
     if (o.keys?.y) o.keys.y.forEach(k => (k.v += offset));
     if (!layerIds.has(o.layerId)) o.layerId = currentLayerId();
@@ -374,6 +393,12 @@ export function duplicatePage(id = S.ui.pageId) {
   const map = new Map<string, string>();
   for (const o of copy.objects) { const n = uid(); map.set(o.id, n); o.id = n; }
   for (const o of copy.objects) o.linkNext = o.linkNext ? map.get(o.linkNext) || null : null;
+  const gm = new Map<string, string>();
+  for (const o of copy.objects) {
+    if (o.group) { if (!gm.has(o.group)) gm.set(o.group, uid('g')); o.group = gm.get(o.group); }
+    if (o.clipBy) o.clipBy = map.get(o.clipBy);
+    if (o.textPath) o.textPath = map.get(o.textPath) ?? o.textPath;
+  }
   S.doc.pages.splice(S.doc.pages.indexOf(src) + 1, 0, copy);
   S.ui.pageId = copy.id; S.ui.sel = [];
   fitAll();

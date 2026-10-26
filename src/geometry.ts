@@ -272,3 +272,84 @@ export function dToSubpaths(d: string): SubPath[] {
   }
   return out;
 }
+
+// ---------- path sampling (text on path, spirals, distribution) ----------
+export interface Sampler { len: number; closed: boolean; at(d: number): { x: number; y: number; a: number } }
+export function pathSampler(sps: SubPath[]): Sampler {
+  const sp = sps[0];
+  const pts: Pt[] = [];
+  if (sp && sp.nodes.length) {
+    const ns = sp.nodes;
+    const segs = sp.closed ? ns.length : ns.length - 1;
+    pts.push({ x: ns[0].x, y: ns[0].y });
+    for (let i = 0; i < segs; i++) {
+      const a = ns[i], b = ns[(i + 1) % ns.length];
+      const straight = a.ox === a.x && a.oy === a.y && b.ix === b.x && b.iy === b.y;
+      const n = straight ? 1 : 28;
+      for (let k = 1; k <= n; k++) pts.push(bez(a, { x: a.ox, y: a.oy }, { x: b.ix, y: b.iy }, b, k / n));
+    }
+  }
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + dist(pts[i - 1], pts[i]));
+  const len = cum[cum.length - 1] || 0;
+  return {
+    len, closed: !!sp?.closed,
+    at(d: number) {
+      if (pts.length < 2) return { x: pts[0]?.x || 0, y: pts[0]?.y || 0, a: 0 };
+      if (sp.closed) d = ((d % len) + len) % len; else d = Math.max(0, Math.min(len, d));
+      let lo = 0, hi = cum.length - 1;
+      while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (cum[mid] <= d) lo = mid; else hi = mid; }
+      const seg = cum[hi] - cum[lo] || 1, f = (d - cum[lo]) / seg;
+      const p = pts[lo], q = pts[hi];
+      return { x: p.x + (q.x - p.x) * f, y: p.y + (q.y - p.y) * f, a: Math.atan2(q.y - p.y, q.x - p.x) };
+    },
+  };
+}
+
+// ---------- line-end markers ----------
+export function markerPaths(o: Obj): SubPath[] {
+  if (o.type !== 'path' || !o.subpaths?.length) return [];
+  const sp = o.subpaths[0];
+  if (sp.closed || sp.nodes.length < 2) return [];
+  const size = Math.max(8, o.strokeWidth * 4.5);
+  const out: SubPath[] = [];
+  const build = (kind: string | undefined, n: PNode, towards: Pt) => {
+    if (!kind || kind === 'none') return;
+    let dx = n.x - towards.x, dy = n.y - towards.y;
+    const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l;
+    const qx = -dy, qy = dx;
+    const P = (a: number, b: number) => ({ x: n.x + dx * a * size + qx * b * size, y: n.y + dy * a * size + qy * b * size });
+    const poly = (pts: Pt[]) => out.push({ closed: true, nodes: pts.map(p => node(p.x, p.y)) });
+    switch (kind) {
+      case 'triangle': poly([P(0.9, 0), P(-0.1, 0.5), P(-0.1, -0.5)]); break;
+      case 'arrow': poly([P(0.9, 0), P(-0.15, 0.55), P(0.15, 0), P(-0.15, -0.55)]); break;
+      case 'diamond': poly([P(0.6, 0), P(0, 0.4), P(-0.6, 0), P(0, -0.4)]); break;
+      case 'square': poly([P(0.35, 0.35), P(0.35, -0.35), P(-0.35, -0.35), P(-0.35, 0.35)]); break;
+      case 'bar': poly([P(0.12, 0.6), P(0.12, -0.6), P(-0.12, -0.6), P(-0.12, 0.6)]); break;
+      case 'dot': { const r = size * 0.38, c = r * K; out.push({ closed: true, nodes: [node(n.x, n.y - r, n.x - c, n.y - r, n.x + c, n.y - r, true), node(n.x + r, n.y, n.x + r, n.y - c, n.x + r, n.y + c, true), node(n.x, n.y + r, n.x + c, n.y + r, n.x - c, n.y + r, true), node(n.x - r, n.y, n.x - r, n.y + c, n.x - r, n.y - c, true)] }); break; }
+    }
+  };
+  const a = sp.nodes[0], b = sp.nodes[1], z = sp.nodes[sp.nodes.length - 1], y = sp.nodes[sp.nodes.length - 2];
+  build(o.markerStart, a, a.ox !== a.x || a.oy !== a.y ? { x: a.ox, y: a.oy } : b.ix !== b.x || b.iy !== b.y ? { x: b.ix, y: b.iy } : b);
+  build(o.markerEnd, z, z.ix !== z.x || z.iy !== z.y ? { x: z.ix, y: z.iy } : y.ox !== y.x || y.oy !== y.y ? { x: y.ox, y: y.oy } : y);
+  return out;
+}
+
+// ---------- matrices ----------
+export function skewMatrix(skx: number, sky: number) {
+  return new DOMMatrix([1, Math.tan((sky * Math.PI) / 180), Math.tan((skx * Math.PI) / 180), 1, 0, 0]);
+}
+
+/** Split a segment of a subpath at parameter t, returning the two halves' new node. */
+export function splitSegment(sub: SubPath, i: number, t: number): PNode {
+  const a = sub.nodes[i], b = sub.nodes[(i + 1) % sub.nodes.length];
+  const lerp = (u: Pt, v: Pt) => ({ x: u.x + (v.x - u.x) * t, y: u.y + (v.y - u.y) * t });
+  const p1 = { x: a.ox, y: a.oy }, p2 = { x: b.ix, y: b.iy };
+  const q0 = lerp(a, p1), q1 = lerp(p1, p2), q2 = lerp(p2, b), r0 = lerp(q0, q1), r1 = lerp(q1, q2), s = lerp(r0, r1);
+  const curved = !(a.ox === a.x && a.oy === a.y && b.ix === b.x && b.iy === b.y);
+  a.ox = curved ? q0.x : a.x; a.oy = curved ? q0.y : a.y;
+  b.ix = curved ? q2.x : b.x; b.iy = curved ? q2.y : b.y;
+  const nn: PNode = curved ? { x: s.x, y: s.y, ix: r0.x, iy: r0.y, ox: r1.x, oy: r1.y, smooth: true } : node(s.x, s.y);
+  sub.nodes.splice(i + 1, 0, nn);
+  return nn;
+}

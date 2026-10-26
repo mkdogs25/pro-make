@@ -32,6 +32,12 @@ export interface UI {
   toast: string | null;
   cursor: { x: number; y: number } | null;
   activeLayer: string | null;
+  measure: { a: { x: number; y: number }; b: { x: number; y: number } } | null;
+  grid: { show: boolean; size: number; snap: boolean };
+  spiralTurns: number;
+  calli: { width: number; angle: number; thinning: number };
+  tableDef: { rows: number; cols: number };
+  recent: string[];
 }
 
 const initialDoc = sampleDoc();
@@ -69,6 +75,12 @@ export const S: { doc: Doc; ui: UI } = {
     toast: null,
     cursor: null,
     activeLayer: null,
+    measure: null,
+    grid: { show: false, size: 20, snap: false },
+    spiralTurns: 4,
+    calli: { width: 16, angle: 45, thinning: 40 },
+    tableDef: { rows: 4, cols: 3 },
+    recent: [],
   },
 };
 

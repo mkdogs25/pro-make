@@ -57,3 +57,45 @@ export function imageFor(url: string): HTMLImageElement {
   if (!i) { i = new Image(); i.onload = () => emit(); i.src = url; imgs.set(url, i); }
   return i;
 }
+
+// ---------- layer masks (alpha = visibility) ----------
+const masks = new Map<string, { canvas: HTMLCanvasElement; rev: string | undefined; loading?: string }>();
+
+/** The layer mask canvas for a raster, or null while it is still loading / when there is none. */
+export function maskCanvas(o: Obj): HTMLCanvasElement | null {
+  if (!o.maskSrc) return null;
+  let e = masks.get(o.id);
+  if (e && e.rev === o.maskRev) return e.canvas;
+  if (!e) { e = { canvas: makeCanvas(o.w || 1, o.h || 1), rev: undefined }; masks.set(o.id, e); }
+  if (e.loading !== o.maskRev) {
+    const want = o.maskRev, src = o.maskSrc;
+    e.loading = want;
+    const img = new Image();
+    img.onload = () => {
+      const cur = masks.get(o.id)!;
+      if (cur.loading !== want) return;
+      cur.canvas.width = img.naturalWidth; cur.canvas.height = img.naturalHeight;
+      cur.canvas.getContext('2d')!.drawImage(img, 0, 0);
+      cur.rev = want; cur.loading = undefined;
+      emit();
+    };
+    img.src = src;
+  }
+  return null;
+}
+
+export function storeMask(o: Obj, canvas: HTMLCanvasElement) {
+  o.maskSrc = canvas.toDataURL('image/png');
+  o.maskRev = Math.random().toString(36).slice(2);
+  masks.set(o.id, { canvas, rev: o.maskRev });
+}
+/** Mutable mask canvas for painting (creates a fully-visible mask if none exists). */
+export function editableMask(o: Obj, fill: 'white' | 'black' | 'none' = 'white'): HTMLCanvasElement {
+  const existing = maskCanvas(o);
+  if (existing) return existing;
+  const rc = rasterCanvas(o);
+  const c = makeCanvas(rc.width, rc.height);
+  if (fill !== 'none') { const x = c.getContext('2d')!; x.fillStyle = '#fff'; if (fill === 'white') x.fillRect(0, 0, c.width, c.height); }
+  masks.set(o.id, { canvas: c, rev: undefined });
+  return c;
+}

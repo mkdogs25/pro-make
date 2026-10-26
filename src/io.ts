@@ -1,11 +1,11 @@
-import P from 'paper/dist/paper-core';
+import P from 'paper';
 import { jsPDF } from 'jspdf';
 import { S, T, commit, emit, page, replaceDoc, toast, afterCommit } from './store';
 import type { Doc, Obj, Page, Paint } from './model';
-import { newObj } from './model';
-import { anim, localBox, objSubpaths, subpathsToD } from './geometry';
-import { renderFrame, renderPage, timelineDuration } from './render';
-import { makeCanvas, rasterCanvas, storeRaster } from './raster';
+import { newObj, isPattern } from './model';
+import { anim, localBox, mapNodes, markerPaths, objMatrix, objSubpaths, subpathsToD } from './geometry';
+import { renderFrame, renderPage, tableGeometry, timelineDuration } from './render';
+import { imageFor, makeCanvas, maskCanvas, rasterCanvas, storeRaster } from './raster';
 import { mediaBlobs, probeMedia } from './media';
 import { addMediaClip, currentLayerId, editTime, fromPaper, addObj } from './ops';
 import { layoutAll, fontString } from './text';
@@ -137,16 +137,46 @@ export async function importFiles(files: File[], at?: { x: number; y: number }) 
   }
 }
 
-export async function importImage(f: Blob, at?: { x: number; y: number }, name = 'Image') {
+/** Read an image file, downscaling very large ones so documents stay light. */
+export async function imageToDataURL(f: Blob, maxDim = 3200): Promise<{ src: string; w: number; h: number } | null> {
   const url = URL.createObjectURL(f);
   const img = new Image();
   await new Promise(r => { img.onload = r; img.onerror = r; img.src = url; });
-  if (!img.naturalWidth) { toast('Could not read that image'); return; }
+  if (!img.naturalWidth) { URL.revokeObjectURL(url); return null; }
+  const k = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+  const c = makeCanvas(img.naturalWidth * k, img.naturalHeight * k);
+  c.getContext('2d')!.drawImage(img, 0, 0, c.width, c.height);
+  URL.revokeObjectURL(url);
+  const keepAlpha = /png|gif|webp|svg/.test(f.type);
+  return { src: c.toDataURL(keepAlpha ? 'image/png' : 'image/jpeg', 0.92), w: img.naturalWidth, h: img.naturalHeight };
+}
+
+/** Put an image into an existing image frame. */
+export async function loadImageInto(o: Obj, f: Blob) {
+  const r = await imageToDataURL(f);
+  if (!r) { toast('Could not read that image'); return; }
+  o.src = r.src; o.imgX = 0; o.imgY = 0; o.imgScale = 1; o.name = (f as File).name || o.name;
+  commit();
+}
+
+export async function importImage(f: Blob, at?: { x: number; y: number }, name = 'Image') {
   if (S.ui.mode === 'motion') {
     const m = await probeMedia(new File([f], (f as File).name || 'image.png', { type: f.type }));
     S.doc.media.push(m); addMediaClip(m); return;
   }
   const pg = page();
+  if (S.ui.mode === 'print') {
+    const r = await imageToDataURL(f);
+    if (!r) { toast('Could not read that image'); return; }
+    const k = Math.min((pg.w * 0.7) / r.w, (pg.h * 0.5) / r.h, 1);
+    const o = newObj('image', currentLayerId(), { name: (f as File).name || name, x: at?.x ?? pg.w / 2, y: at?.y ?? pg.h / 2, w: Math.round(r.w * k), h: Math.round(r.h * k), src: r.src, fill: null });
+    addObj(o); commit();
+    return;
+  }
+  const url = URL.createObjectURL(f);
+  const img = new Image();
+  await new Promise(r => { img.onload = r; img.onerror = r; img.src = url; });
+  if (!img.naturalWidth) { toast('Could not read that image'); return; }
   const c = makeCanvas(img.naturalWidth, img.naturalHeight);
   c.getContext('2d')!.drawImage(img, 0, 0);
   const fit = Math.min(1, (pg.w * 0.8) / img.naturalWidth, (pg.h * 0.8) / img.naturalHeight);
@@ -243,6 +273,20 @@ const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 function svgPaint(p: Paint, defs: string[], id: string, o: Obj): string {
   if (!p) return 'none';
   if (typeof p === 'string') return p;
+  if (isPattern(p)) {
+    const sz = Math.max(4, p.size);
+    let shape = '';
+    switch (p.pattern) {
+      case 'stripes': case 'diagonal': shape = `<rect width="${sz / 2}" height="${sz}" fill="${p.c2}"/>`; break;
+      case 'dots': shape = `<circle cx="${sz / 2}" cy="${sz / 2}" r="${sz * 0.24}" fill="${p.c2}"/>`; break;
+      case 'checks': shape = `<rect width="${sz / 2}" height="${sz / 2}" fill="${p.c2}"/><rect x="${sz / 2}" y="${sz / 2}" width="${sz / 2}" height="${sz / 2}" fill="${p.c2}"/>`; break;
+      case 'grid': shape = `<rect width="${sz}" height="${sz}" fill="none" stroke="${p.c2}" stroke-width="${sz * 0.12}"/>`; break;
+      case 'cross': shape = `<rect x="${sz * 0.4}" y="${sz * 0.15}" width="${sz * 0.2}" height="${sz * 0.7}" fill="${p.c2}"/><rect x="${sz * 0.15}" y="${sz * 0.4}" width="${sz * 0.7}" height="${sz * 0.2}" fill="${p.c2}"/>`; break;
+      case 'waves': shape = `<path d="M0 ${sz / 2} Q${sz / 4} ${sz * 0.1} ${sz / 2} ${sz / 2} T${sz} ${sz / 2}" fill="none" stroke="${p.c2}" stroke-width="${sz * 0.12}"/>`; break;
+    }
+    defs.push(`<pattern id="${id}" patternUnits="userSpaceOnUse" width="${sz}" height="${sz}" patternTransform="rotate(${p.angle + (p.pattern === 'diagonal' ? 45 : 0)})"><rect width="${sz}" height="${sz}" fill="${p.c1}"/>${shape}</pattern>`);
+    return `url(#${id})`;
+  }
   const b = localBox(o);
   const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
   const stops = p.stops.map(s => `<stop offset="${s.o}" stop-color="${s.c}"/>`).join('');
@@ -259,42 +303,119 @@ function pageSVGBody(doc: Doc, pg: Page, t: number, defs: string[], depth = 0): 
   const layout = layoutAll(doc);
   const master = pg.masterId ? doc.pages.find(p => p.id === pg.masterId) : null;
   const srcs = master ? [master, pg] : [pg];
+  const lookup = new Map<string, Obj>();
+  for (const sc of srcs) for (const o of sc.objects) lookup.set(o.id, o);
   const pn = doc.pages.filter(p => !p.isMaster).indexOf(pg) + 1;
   let out = pg.bg ? `<rect width="${pg.w}" height="${pg.h}" fill="${pg.bg}"/>` : '';
+  const xf = (o: Obj) => { const a = anim(o, t); return `translate(${a.x} ${a.y}) rotate(${a.rotation}) scale(${a.sx} ${a.sy})`; };
   for (const layer of doc.layers) {
     if (!layer.visible) continue;
     out += `<g id="${esc(layer.name)}" opacity="${layer.opacity}">`;
     for (const src of srcs) for (const o of src.objects) {
-      if (o.layerId !== layer.id || !o.visible) continue;
+      if (o.layerId !== layer.id || !o.visible || o.isClip) continue;
       const a = anim(o, t);
-      const tr = `translate(${a.x} ${a.y}) rotate(${a.rotation}) scale(${a.sx} ${a.sy})`;
+      const tr = xf(o);
       const blend = o.blend && o.blend !== 'source-over' ? `;mix-blend-mode:${o.blend}` : '';
-      const common = `transform="${tr}" opacity="${a.opacity}" style="${blend}"`;
+      // blur / drop shadow
+      let filt = '';
+      if (o.blur || o.shadow) {
+        const fid = `fx${o.id}`;
+        let prims = '';
+        if (o.blur) prims += `<feGaussianBlur stdDeviation="${o.blur}"/>`;
+        if (o.shadow) prims += `<feDropShadow dx="${o.shadow.dx}" dy="${o.shadow.dy}" stdDeviation="${o.shadow.blur / 2}" flood-color="${o.shadow.color.slice(0, 7)}" flood-opacity="${o.shadow.color.length > 7 ? parseInt(o.shadow.color.slice(7, 9), 16) / 255 : 1}"/>`;
+        defs.push(`<filter id="${fid}" x="-50%" y="-50%" width="200%" height="200%">${prims}</filter>`);
+        filt = ` filter="url(#${fid})"`;
+      }
+      const common = `transform="${tr}" opacity="${a.opacity}" style="${blend}"${filt}`;
       const b = localBox(o);
-      if (o.type === 'text') {
+      let piece = '';
+      if (o.type === 'text' && o.textPath && lookup.get(o.textPath)) {
+        const pth = lookup.get(o.textPath)!;
+        const pid = `tp${o.id}`;
+        defs.push(`<path id="${pid}" d="${subpathsToD(mapNodes(objSubpaths(pth), objMatrix(pth, t)))}"/>`);
+        const fill = svgPaint(o.fill, defs, `g${o.id}f`, o);
+        const anchor = o.align === 'center' ? 'middle' : o.align === 'right' ? 'end' : 'start';
+        const start = o.align === 'center' ? '50%' : o.align === 'right' ? '100%' : `${o.textOffset || 0}`;
+        piece = `<text fill="${fill}" opacity="${a.opacity}" font-family="${esc(o.font || 'Inter')}" font-size="${o.size}" font-weight="${o.weight || 400}" font-style="${o.italic ? 'italic' : 'normal'}" letter-spacing="${o.letterSpacing || 0}" text-anchor="${anchor}"><textPath href="#${pid}" startOffset="${start}">${esc((o.text || '').replace(/\n/g, ' '))}</textPath></text>`;
+      } else if (o.type === 'text') {
         const lay = layout.get(o.id);
         const lh = (o.size || 16) * (o.lineHeight || 1.3);
         const fill = svgPaint(o.fill, defs, `g${o.id}f`, o);
-        const anchor = o.align === 'center' ? 'middle' : o.align === 'right' ? 'end' : 'start';
+        const strokeAttr = typeof o.stroke === 'string' && o.strokeWidth > 0 ? ` stroke="${o.stroke}" stroke-width="${o.strokeWidth}" paint-order="stroke"` : '';
         const lines = (lay?.lines || []).map(l => {
-          const x = o.align === 'center' ? l.x + l.colW / 2 : o.align === 'right' ? l.x + l.colW : l.x;
-          return `<text x="${x}" y="${l.y + lh / 2}" dominant-baseline="middle" text-anchor="${anchor}">${esc(l.text.replace(/\{page\}/g, String(pn)))}</text>`;
+          if (l.text.includes('{page}')) {
+            const x = o.align === 'center' ? l.x + l.colW / 2 : o.align === 'right' ? l.x + l.colW : l.x + l.indent;
+            const anchor = o.align === 'center' ? 'middle' : o.align === 'right' ? 'end' : 'start';
+            return `<text x="${x}" y="${l.y + lh / 2}" dominant-baseline="middle" text-anchor="${anchor}">${esc(l.text.replace(/\{page\}/g, String(pn)))}</text>`;
+          }
+          return l.words.map(w => `<text x="${w.x}" y="${l.y + lh / 2}" dominant-baseline="middle"${w.b ? ' font-weight="700"' : ''}${w.i ? ' font-style="italic"' : ''}>${esc(w.text)}</text>`).join('');
         }).join('');
-        out += `<g ${common} fill="${fill}" font-family="${esc(o.font || 'Inter')}" font-size="${o.size}" font-weight="${o.weight || 400}" font-style="${o.italic ? 'italic' : 'normal'}" letter-spacing="${o.letterSpacing || 0}">` +
+        piece = `<g ${common} fill="${fill}"${strokeAttr} font-family="${esc(o.font || 'Inter')}" font-size="${o.size}" font-weight="${o.weight || 400}" font-style="${o.italic ? 'italic' : 'normal'}" letter-spacing="${o.letterSpacing || 0}">` +
           (o.frameFill ? `<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" fill="${o.frameFill}"/>` : '') + lines + '</g>';
       } else if (o.type === 'raster') {
-        out += `<image ${common} x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" href="${rasterCanvas(o).toDataURL()}" preserveAspectRatio="none"/>`;
+        const mk = o.maskSrc ? maskCanvas(o) : null;
+        let url: string;
+        if (mk) { const c = rasterCanvas(o), t2 = makeCanvas(c.width, c.height), x = t2.getContext('2d')!; x.drawImage(c, 0, 0); x.globalCompositeOperation = 'destination-in'; x.drawImage(mk, 0, 0, c.width, c.height); url = t2.toDataURL(); }
+        else url = rasterCanvas(o).toDataURL();
+        piece = `<image ${common} x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" href="${url}" preserveAspectRatio="none"/>`;
+      } else if (o.type === 'image') {
+        defs.push(`<clipPath id="ic${o.id}"><rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}"/></clipPath>`);
+        let inner = o.fill ? `<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" fill="${typeof o.fill === 'string' ? o.fill : '#EEE'}"/>` : '';
+        if (o.src) {
+          const im = imageFor(o.src);
+          const iw = im.naturalWidth || b.w, ih = im.naturalHeight || b.h;
+          let sx = 1, sy = 1;
+          switch (o.fit || 'fill') { case 'fit': sx = sy = Math.min(b.w / iw, b.h / ih); break; case 'fill': sx = sy = Math.max(b.w / iw, b.h / ih); break; case 'stretch': sx = b.w / iw; sy = b.h / ih; break; }
+          const k = o.imgScale || 1;
+          inner += `<image href="${o.src}" x="${-iw / 2}" y="${-ih / 2}" width="${iw}" height="${ih}" transform="translate(${b.x + b.w / 2 + (o.imgX || 0)} ${b.y + b.h / 2 + (o.imgY || 0)}) rotate(${o.imgRot || 0}) scale(${sx * k} ${sy * k})" preserveAspectRatio="none"/>`;
+        }
+        piece = `<g ${common}><g clip-path="url(#ic${o.id})">${inner}</g></g>`;
+      } else if (o.type === 'table') {
+        const { rows, cols, cw, rh } = tableGeometry(o);
+        const pad = o.pad ?? 6, lh = (o.size || 14) * (o.lineHeight || 1.3);
+        let g = '', y = b.y;
+        for (let r = 0; r < rows; r++) {
+          let x = b.x;
+          for (let c = 0; c < cols; c++) {
+            const bg = o.header && r === 0 && o.headerFill ? o.headerFill : o.zebra && r % 2 === 0 ? o.zebra : o.frameFill;
+            if (bg) g += `<rect x="${x}" y="${y}" width="${cw[c]}" height="${rh[r]}" fill="${bg}"/>`;
+            const txt = o.cells?.[r]?.[c] || '';
+            if (txt) {
+              const al = o.align || 'left';
+              const tx = al === 'center' ? x + cw[c] / 2 : al === 'right' ? x + cw[c] - pad : x + pad;
+              g += txt.split('\n').map((ln, i) => `<text x="${tx}" y="${y + pad + i * lh + lh / 2}" dominant-baseline="middle" text-anchor="${al === 'center' ? 'middle' : al === 'right' ? 'end' : 'start'}"${o.header && r === 0 ? ' font-weight="700"' : ''}>${esc(ln)}</text>`).join('');
+            }
+            x += cw[c];
+          }
+          y += rh[r];
+        }
+        if ((o.borderW ?? 1) > 0) {
+          let yy = b.y, xx = b.x, ln = '';
+          for (let r = 0; r <= rows; r++) { ln += `M${b.x} ${yy}H${b.x + b.w}`; if (r < rows) yy += rh[r]; }
+          for (let c = 0; c <= cols; c++) { ln += `M${xx} ${b.y}V${b.y + b.h}`; if (c < cols) xx += cw[c]; }
+          g += `<path d="${ln}" stroke="${o.borderColor || '#000'}" stroke-width="${o.borderW ?? 1}" fill="none"/>`;
+        }
+        piece = `<g ${common} fill="${typeof o.fill === 'string' ? o.fill : '#000'}" font-family="${esc(o.font || 'Inter')}" font-size="${o.size || 14}" font-weight="${o.weight || 400}">${g}</g>`;
       } else if (o.type === 'embed') {
         const target = doc.pages.find(p => p.id === o.pageId);
         if (target) {
           const s = Math.min(b.w / target.w, b.h / target.h);
           defs.push(`<clipPath id="c${o.id}"><rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}"/></clipPath>`);
-          out += `<g ${common}><g clip-path="url(#c${o.id})"><g transform="translate(${-target.w * s / 2} ${-target.h * s / 2}) scale(${s})">${pageSVGBody(doc, target, t, defs, depth + 1)}</g></g></g>`;
+          piece = `<g ${common}><g clip-path="url(#c${o.id})"><g transform="translate(${-target.w * s / 2} ${-target.h * s / 2}) scale(${s})">${pageSVGBody(doc, target, t, defs, depth + 1)}</g></g></g>`;
         }
       } else {
         const fill = svgPaint(o.fill, defs, `g${o.id}f`, o), stroke = svgPaint(o.stroke, defs, `g${o.id}s`, o);
-        out += `<path ${common} d="${subpathsToD(objSubpaths(o))}" fill="${fill}" fill-rule="${o.fillRule || 'nonzero'}" stroke="${o.strokeWidth > 0 ? stroke : 'none'}" stroke-width="${o.strokeWidth}" stroke-linecap="${o.cap || 'round'}" stroke-linejoin="${o.join || 'round'}"${o.dash?.length ? ` stroke-dasharray="${o.dash.join(' ')}"` : ''}><title>${esc(o.name)}</title></path>`;
+        piece = `<path ${common} d="${subpathsToD(objSubpaths(o))}" fill="${fill}" fill-rule="${o.fillRule || 'nonzero'}" stroke="${o.strokeWidth > 0 ? stroke : 'none'}" stroke-width="${o.strokeWidth}" stroke-linecap="${o.cap || 'round'}" stroke-linejoin="${o.join || 'round'}"${o.dash?.length ? ` stroke-dasharray="${o.dash.join(' ')}"` : ''}><title>${esc(o.name)}</title></path>`;
+        const mk = markerPaths(o);
+        if (mk.length) piece += `<path transform="${tr}" opacity="${a.opacity}" d="${subpathsToD(mk)}" fill="${typeof o.stroke === 'string' ? o.stroke : '#000'}"/>`;
       }
+      if (o.clipBy && lookup.get(o.clipBy)) {
+        const cl = lookup.get(o.clipBy)!;
+        const cid = `cp${o.id}`;
+        defs.push(`<clipPath id="${cid}"><path transform="${xf(cl)}" d="${subpathsToD(objSubpaths(cl))}"/></clipPath>`);
+        piece = `<g clip-path="url(#${cid})">${piece}</g>`;
+      }
+      out += piece;
     }
     out += '</g>';
   }
