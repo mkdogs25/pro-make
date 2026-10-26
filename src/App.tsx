@@ -12,13 +12,16 @@ import Timeline from './ui/Timeline';
 import { ColourPanel } from './ui/ColourPanel';
 import { ToolPanel } from './ui/ToolPanel';
 import { MenuBar } from './ui/MenuBar';
+import { HistoryPanel } from './ui/HistoryPanel';
+import { ScriptModal } from './ui/ScriptModal';
+import { ImageExportModal } from './ui/ImageExportModal';
 import { AskModal, ScaleImageModal, CanvasSizeModal, CurvesModal, type Ask } from './ui/GrainModals';
 import { SymbolsPanel } from './ui/SymbolsPanel';
 import { TraceModal, TilesModal } from './ui/InkModals';
 import { ExportOptsModal, SourceModal, ScopesPanel } from './ui/MotionModals';
 import { FindModal, StoryModal, DocInfoModal, PdfModal, TocModal } from './ui/PrintModals';
 import { copySel, cutSel, paste, duplicate, deleteSelection, deleteClip, splitClip, editTime, booleanOp, zorder } from './ops';
-import { saveProject, openProject, importFiles, pickFiles, exportPNG, exportJPEG, exportSVG, exportPDF, exportSelectionPNG, exportSelectionSVG, exportState, newDocument, restoreAutosave, startAutosave } from './io';
+import { saveORA, saveProject, openProject, importFiles, pickFiles, exportPNG, exportSVG, exportPDF, exportSelectionPNG, exportSelectionSVG, exportState, newDocument, restoreAutosave, startAutosave } from './io';
 import { togglePlay, seek, pause } from './playback';
 import { groupSel, ungroupSel } from './ink';
 import { addMarker, copyClip, duplicateClip, fitTimeline, pasteClip, setInPoint, setOutPoint } from './motion';
@@ -83,17 +86,20 @@ function TopBar() {
           { label: 'Story editor…', icon: 'frame', onClick: () => { if (selected().some(o => o.type === 'text')) { S.ui.modal = { kind: 'story' }; emit(); } else toast('Select a text frame first'); } },
           { label: 'Insert table of contents…', icon: 'menu', onClick: () => { S.ui.modal = { kind: 'toc' }; emit(); } },
           { label: 'Document info…', icon: 'file', onClick: () => { S.ui.modal = { kind: 'docinfo' }; emit(); } },
+          'sep',
+          { label: 'Script console…', icon: 'code', onClick: () => { S.ui.modal = { kind: 'script' }; emit(); } },
         ]} />
         <Menu label="File" icon="file" align="right" items={[
           { label: 'New document', icon: 'file', onClick: () => { if (confirm('Start a new document? Unsaved changes will be lost.')) newDocument(); } },
           { label: 'Open project…', icon: 'upload', kbd: 'Ctrl+O', onClick: () => openProject() },
           { label: 'Save project', icon: 'download', kbd: 'Ctrl+S', onClick: saveProject },
           'sep',
-          { label: 'Import image, SVG, video or audio…', icon: 'image', kbd: 'Ctrl+I', onClick: async () => importFiles(await pickFiles('image/*,.svg,video/*,audio/*,.promake')) },
+          { label: 'Import image, SVG, video or audio…', icon: 'image', kbd: 'Ctrl+I', onClick: async () => importFiles(await pickFiles('image/*,.svg,video/*,audio/*,.promake,.ora')) },
         ]} />
         <Menu label="Export" icon="download" align="right" items={[
           { label: mode === 'motion' ? 'Current frame as PNG' : 'Page as PNG (2×)', icon: 'image', kbd: 'Ctrl+E', onClick: () => exportPNG() },
-          { label: 'Page as JPEG', icon: 'image', onClick: () => exportJPEG(), disabled: mode === 'motion' },
+          { label: 'Image… (PNG, JPEG, WebP)', icon: 'image', onClick: () => { S.ui.modal = { kind: 'export-image' }; emit(); }, disabled: mode === 'motion' },
+          { label: 'Layered file (OpenRaster .ora)', icon: 'layers', onClick: saveORA, disabled: mode === 'motion' },
           { label: 'Page as SVG', icon: 'pen', onClick: exportSVG, disabled: mode === 'motion' },
           { label: 'PDF… (bleed, crop marks, links)', icon: 'pages', onClick: () => { S.ui.modal = { kind: 'pdf' }; emit(); } },
           { label: 'Selection as PNG', icon: 'image', onClick: () => exportSelectionPNG(), disabled: mode === 'motion' },
@@ -234,10 +240,10 @@ function StatusBar() {
 
 // ---------------- sidebar ----------------
 const TABS: Record<Mode, { id: string; label: string; icon: string }[]> = {
-  motion: [{ id: 'props', label: 'Inspector', icon: 'sliders' }, { id: 'media', label: 'Media', icon: 'film' }, { id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'scopes', label: 'Scopes', icon: 'wave' }],
-  ink: [{ id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'symbols', label: 'Symbols', icon: 'symbols' }],
-  print: [{ id: 'pages', label: 'Pages', icon: 'pages' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'styles', label: 'Styles', icon: 'type' }, { id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'symbols', label: 'Symbols', icon: 'symbols' }],
-  grain: [{ id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'tool', label: 'Tool options', icon: 'brush' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'adjust', label: 'Adjust', icon: 'sparkle' }],
+  motion: [{ id: 'props', label: 'Inspector', icon: 'sliders' }, { id: 'media', label: 'Media', icon: 'film' }, { id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'scopes', label: 'Scopes', icon: 'wave' }, { id: 'history', label: 'History', icon: 'history' }],
+  ink: [{ id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'symbols', label: 'Symbols', icon: 'symbols' }, { id: 'history', label: 'History', icon: 'history' }],
+  print: [{ id: 'pages', label: 'Pages', icon: 'pages' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'styles', label: 'Styles', icon: 'type' }, { id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'symbols', label: 'Symbols', icon: 'symbols' }, { id: 'history', label: 'History', icon: 'history' }],
+  grain: [{ id: 'layers', label: 'Layers', icon: 'layers' }, { id: 'tool', label: 'Tool options', icon: 'brush' }, { id: 'props', label: 'Properties', icon: 'sliders' }, { id: 'colour', label: 'Colour', icon: 'colour' }, { id: 'adjust', label: 'Adjust', icon: 'sparkle' }, { id: 'history', label: 'History', icon: 'history' }],
 };
 
 function Swatches() {
@@ -282,6 +288,7 @@ function Sidebar() {
         {tab === 'adjust' && <AdjustPanel />}
         {tab === 'media' && <MediaPanel />}
         {tab === 'colour' && <ColourPanel />}
+        {tab === 'history' && <HistoryPanel />}
         {tab === 'tool' && <ToolPanel />}
         {tab === 'scopes' && <ScopesPanel />}
         {tab === 'symbols' && <SymbolsPanel />}
@@ -568,6 +575,8 @@ export default function App() {
       {m?.kind === 'preflight' && <Preflight />}
       {m?.kind === 'export-video' && <VideoProgress />}
       {m?.kind === 'shortcuts' && <Shortcuts />}
+      {m?.kind === 'script' && <ScriptModal />}
+      {m?.kind === 'export-image' && <ImageExportModal />}
       {m?.kind === 'export-opts' && <ExportOptsModal />}
       {m?.kind === 'source' && <SourceModal id={m.data as string} />}
       {m?.kind === 'find' && <FindModal />}

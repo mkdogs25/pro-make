@@ -14,6 +14,7 @@ import { play, pause, audioStream, syncMedia } from './playback';
 import { GifEncoder } from './gif';
 import { zipFiles } from './zip';
 import { sampleDoc } from './sample';
+import { exportORA, importORA } from './ora';
 
 export function download(blob: Blob, name: string) {
   const a = document.createElement('a');
@@ -127,6 +128,7 @@ export async function restoreAutosave(): Promise<boolean> {
 export async function importFiles(files: File[], at?: { x: number; y: number }) {
   for (const f of files) {
     if (f.name.endsWith('.promake')) { await openProject(f); continue; }
+    if (f.name.toLowerCase().endsWith('.ora')) { try { await importORA(f); } catch (e) { toast(`Could not open ${f.name}: ${(e as Error).message}`); } continue; }
     if (f.type === 'image/svg+xml' || f.name.endsWith('.svg')) { await importSVG(await f.text()); continue; }
     if (f.type.startsWith('image/')) { await importImage(f, at); continue; }
     if (f.type.startsWith('video/') || f.type.startsWith('audio/')) {
@@ -646,3 +648,37 @@ export async function exportVideo(arg: Partial<VideoOpts> = {}) {
 }
 
 export { fontString };
+
+export async function saveORA() {
+  try { download(await exportORA(), `${safe(page().name)}.ora`); toast('Layered OpenRaster file saved. It opens in GIMP and Krita.'); }
+  catch (e) { toast(`Could not export: ${(e as Error).message}`); }
+}
+
+export interface ImgOpts { format: 'png' | 'jpeg' | 'webp'; quality: number; scale: number; bg: 'transparent' | 'white' | 'page'; scope: 'page' | 'selection' }
+export const defaultImgOpts: ImgOpts = { format: 'png', quality: 0.9, scale: 1, bg: 'transparent', scope: 'page' };
+export function exportImage(o: ImgOpts, toClipboard = false) {
+  const pg = page();
+  let box = { x: 0, y: 0, w: pg.w, h: pg.h };
+  let hidden: Set<string> | undefined;
+  if (o.scope === 'selection') {
+    const objs = pg.objects.filter(x => S.ui.sel.includes(x.id));
+    if (!objs.length) { toast('Select something first, or export the whole page'); return; }
+    const u = unionBox(objs.map(x => pageBox(x, editTime())))!;
+    box = { x: Math.floor(u.x), y: Math.floor(u.y), w: Math.ceil(u.w), h: Math.ceil(u.h) };
+    const keep = new Set(objs.map(x => x.id)); for (const x of objs) if (x.clipBy) keep.add(x.clipBy);
+    hidden = new Set(pg.objects.filter(x => !keep.has(x.id)).map(x => x.id));
+  }
+  const c = makeCanvas(box.w * o.scale, box.h * o.scale);
+  const ctx = c.getContext('2d')!;
+  const fill = o.bg === 'white' || o.format === 'jpeg' ? '#ffffff' : o.bg === 'page' && pg.bg ? pg.bg : null;
+  if (fill) { ctx.fillStyle = fill; ctx.fillRect(0, 0, c.width, c.height); }
+  ctx.scale(o.scale, o.scale); ctx.translate(-box.x, -box.y);
+  renderPage(ctx, S.doc, pg, { time: editTime(), print: true, hidden, noBg: o.bg !== 'page' || o.scope === 'selection' });
+  const mime = `image/${o.format}`;
+  c.toBlob(b => {
+    if (!b) { toast('Could not encode that image'); return; }
+    if (toClipboard) {
+      navigator.clipboard.write([new ClipboardItem({ 'image/png': b })]).then(() => toast('Copied to the clipboard'), () => toast('The browser blocked clipboard access'));
+    } else download(b, `${safe(pg.name)}.${o.format === 'jpeg' ? 'jpg' : o.format}`);
+  }, toClipboard ? 'image/png' : mime, o.quality);
+}

@@ -14,8 +14,11 @@ import * as model from './model';
 import * as motion from './motion';
 import * as clipfx from './clipfx';
 import * as geometry from './geometry';
+import { makeApi } from './api';
 
 if (import.meta.env.DEV) (window as unknown as { __pm: unknown }).__pm = { S, T, commit, emit, ink, ops, io, grain, raster, brush, render, model, motion, clipfx, geometry };
+
+(window as unknown as { promake: unknown }).promake = makeApi();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
